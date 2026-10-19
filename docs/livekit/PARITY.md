@@ -26,7 +26,27 @@ All phases are done (1-9), apart from the open items below and under each
 phase. Merged on master through #28 (multi-node). New work branches from
 master.
 
-**Done since:** `fast_publish` in the JoinResponse, as LiveKit
+**LiveKit mismatches** (`bench/e2e/sstate.mjs`, `shutdown.mjs`,
+`perms.mjs`, each run against both servers):
+- `stream_state_update` as LiveKit's stream allocator tracks it per
+  subscription: ACTIVE when video starts flowing from anything else
+  (first subscribe, after the publisher unmutes, after the subscriber
+  re-enables; LiveKit's `OnResume` on the first forwarded packet), PAUSED
+  when congestion control pauses it, nothing on mute or disable (which go
+  quietly inactive). Was: PAUSED/ACTIVE only around bandwidth pauses,
+  ACTIVE at the allocation rather than when video resumed.
+- Stopping natter closes every room as LiveKit's `RoomManager.Stop`:
+  each participant gets a leave (DISCONNECT, SERVER_SHUTDOWN), joins are
+  refused, and `participant_left` and `room_finished`
+  (ROOM_END_SERVER_SHUTDOWN) go out, natter waiting up to 5 s for the
+  rooms and 5 s for the webhooks. Was: the process just ended. See
+  "Deliberate differences" for how LiveKit's own stop differs.
+- Permission event order: not a mismatch. LiveKit re-checks a
+  publisher's tracks in Go map order (`uptrackmanager.go`
+  `maybeRevokeSubscriptions`), so audio or video comes first at random
+  (2 of 3 runs video first); `perms.mjs` now sorts each step's events.
+
+**Done before:** `fast_publish` in the JoinResponse, as LiveKit
 (`CanPublish() && !hasICEFallback`, `pkg/rtc/room.go`
 `createJoinResponseLocked`; natter's ICE fallback is `Fallback::pref`
 other than `Any`). Dual-PC SDKs now connect the publisher PC at join, so a
@@ -56,20 +76,18 @@ Timing each stage found:
   the token check, as LiveKit's.
 
 **Next:** the open items, in order:
-   - `perms.mjs`: LiveKit sends a participant's subscription permission
-     events video first, natter audio first (on master too, so older than
-     the join work).
    - Congestion control at 1 Mbit/s on a 150 ms path: p99 285 ms
      against LiveKit's 196 ms.
    - Temporal layers by `fps`.
-   - `stream_state_update`.
    - DD rewrite (`DDForwarder`).
    - Stream trackers as LiveKit's.
-   - `subscribed_audio_codec_update`.
+   - `subscribed_audio_codec_update`: needs audio backup codecs first
+     (audio publications with more than one codec, which natter doesn't
+     take yet). Of LiveKit's SDKs only the Go one (`server-sdk-go`) acts on
+     it, publishing the backup codec asked for; the JS SDK ignores it.
    - A Chrome test under a real bottleneck.
    - UDP-unstable fallback.
    - WHEP.
-   - `room_finished` with SERVER_SHUTDOWN when natter stops.
    - Multi-node: Redis TLS/Sentinel/Cluster, draining that waits for
      rooms, several replicas on Kubernetes (UDP ports per pod).
 
@@ -259,8 +277,8 @@ H.265 is negotiated but untested: Chrome on Linux doesn't encode it.
       5 s (`dynacast_pause_delay`); not while muted, re-sent on unmute (C.4)
 - [x] Publisher mute stops forwarding; on unmute subscribers restart at a
       keyframe. Subscriber `disabled` likewise (C.7)
-- [ ] `stream_state_update` (PAUSED/ACTIVE): LiveKit sends it when
-      congestion control pauses a track, so it comes with phase 5
+- [x] `stream_state_update` (PAUSED/ACTIVE) per subscription, as
+      LiveKit's stream allocator (`bench/e2e/sstate.mjs`; see "Status")
 
 Verified with LiveKit's JS SDK 2.23 in Chrome (single PC, VP8 and H.264
 simulcast, adaptive stream and dynacast): a subscriber's 320×180 video
@@ -325,7 +343,8 @@ track and LOW for the other, no loss.
       backup and the primary is turned off, else both flow. Verified in
       Chrome (AV1 publisher, a subscriber without AV1): VP8 at every size;
       with 5 in the room AV1 to the others, VP8 to it; same as LiveKit
-- [ ] `subscribed_audio_codec_update` (audio with more than one codec)
+- [ ] `subscribed_audio_codec_update` (audio with more than one codec;
+      needs audio backup codecs, see "Status")
 
 ### 7. Transport and resilience
 
@@ -541,6 +560,15 @@ track and LOW for the other, no loss.
   one engine, as LiveKit's one port.
 - natter's embedded TURN also serves TCP on `turn.udp_port`, and
   advertises it.
+- `stream_state_update` reaches single-PC clients too. LiveKit's
+  single-PC subscriptions run on its publisher transport, whose handler
+  has no `OnStreamStateChange` (`participant.go`), so it logs the change
+  and never sends it.
+- Stopping: natter closes every room on the first SIGTERM (or Ctrl-C)
+  and waits for the webhooks to go out. LiveKit's first signal waits for
+  the participants to leave on their own, however long that takes; a
+  second closes the rooms (SERVER_SHUTDOWN) and exits without waiting, so
+  most of their `participant_left` and `room_finished` webhooks are lost.
 - `livekit_track_subscribed_total` falls back as subscribers leave; in
   LiveKit 1.13.10 it stayed up after a load test's participants had all
   gone (no unsubscribe recorded when a participant leaves).

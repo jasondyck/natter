@@ -143,6 +143,29 @@ pub struct Handle {
     pub turn: Option<crate::turn::Turn>,
 }
 
+impl Handle {
+    /// Closes every room on every shard (SERVER_SHUTDOWN), waiting up to
+    /// `wait` for them to go.
+    pub async fn shutdown(&self, wait: Duration) {
+        let mut replies = vec![];
+        for shard in &self.shards {
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            let op = Box::new(admin::AdminOp::Shutdown);
+            if shard.commands.send(Command::Admin { op, reply }).is_ok() {
+                replies.push(rx);
+            }
+        }
+        let all = async {
+            for rx in replies {
+                let _ = rx.await;
+            }
+        };
+        if tokio::time::timeout(wait, all).await.is_err() {
+            warn!("stopping with rooms still open");
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Shard {
     pub commands: Commands,
@@ -417,6 +440,14 @@ impl DownState {
     }
 }
 
+/// LiveKit's stream allocator `StreamState`, per video downtrack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamState {
+    Inactive,
+    Active,
+    Paused,
+}
+
 /// A track forwarded to a subscriber.
 struct DownTrack {
     track_sid: String,
@@ -442,6 +473,11 @@ struct DownTrack {
     /// Video: the layer congestion control holds it to (`applied` None
     /// until first allocated; Some(None) while paused for bandwidth).
     hold: allocator::Hold,
+    /// Video: what the subscriber was last told by `stream_state_update`,
+    /// as LiveKit's stream allocator `Track`: ACTIVE when forwarding starts
+    /// from anything else (its `OnResume`), PAUSED when congestion control
+    /// pauses it; muting or disabling makes it inactive without a message.
+    stream_state: StreamState,
     /// Video SVC: the decode target it receives.
     svc: video::SvcDown,
     /// Video: the subscriber has no payload type for the track's primary
@@ -1075,6 +1111,10 @@ pub struct Engine {
     rpcs: HashMap<String, admin::PendingRpc>,
     webhooks: Option<Webhooks>,
     agents: Agents,
+    /// The server is stopping (`AdminOp::Shutdown`): every room closes
+    /// (SERVER_SHUTDOWN), joins are refused, and these are answered once
+    /// the last room has gone.
+    shutdown: Option<Vec<admin::AdminTx>>,
     /// This engine's own command queue, for what comes back to it.
     back: Commands,
     wake: Arc<Wake>,
@@ -1126,6 +1166,7 @@ pub fn run(
         rpcs: HashMap::new(),
         webhooks,
         agents,
+        shutdown: None,
         back,
         wake,
     };
@@ -1698,6 +1739,10 @@ impl Engine {
 
     fn join(&mut self, join: Join) {
         let now = Instant::now();
+        if self.shutdown.is_some() {
+            self.refuse_join(&join, lk::DisconnectReason::ServerShutdown);
+            return;
+        }
         if self.placement.total() >= self.max_participants {
             warn!(max = self.max_participants, "server full; join refused");
             self.metrics.joins_refused_total.fetch_add(1, Relaxed);
@@ -2337,6 +2382,7 @@ impl Engine {
                         .find(|d| d.track_sid == sid)
                 {
                     d.layer = None;
+                    d.stream_state = StreamState::Inactive;
                 }
             }
         }
@@ -2641,15 +2687,13 @@ impl Engine {
                 let paused = d.hold.applied == Some(None);
                 let layer = d.hold.applied.flatten();
                 debug!(identity = %p.identity, track = %d.track_sid, ?layer, ?change, estimate, ?congestion, "allocated");
-                if paused != was_paused {
+                // ACTIVE comes when video flows again (`forward_video`).
+                if paused && !was_paused && d.stream_state != StreamState::Paused {
+                    d.stream_state = StreamState::Paused;
                     states.push(lk::StreamStateInfo {
                         participant_sid: d.publisher_sid.clone(),
                         track_sid: d.track_sid.clone(),
-                        state: if paused {
-                            lk::StreamState::Paused
-                        } else {
-                            lk::StreamState::Active
-                        } as i32,
+                        state: lk::StreamState::Paused as i32,
                     });
                 }
             }
@@ -3767,11 +3811,16 @@ impl Engine {
             let unallocated = if estimating { 0 } else { video::ANY_LAYER };
             let (Some(max), Some(cap)) = (d.max_layer, d.hold.applied.unwrap_or(Some(unallocated)))
             else {
+                if d.max_layer.is_none() {
+                    d.stream_state = StreamState::Inactive;
+                }
                 d.layer = None;
                 d.svc = video::SvcDown::default();
                 continue;
             };
             let target = targets[usize::from(max.min(cap).min(3))];
+            // Forwarding starts here from nothing (LiveKit's `IsResuming`).
+            let mut layer_started = false;
             if d.layer != target {
                 if let Some(target) = target
                     && !want_keyframe.contains(&target)
@@ -3780,6 +3829,7 @@ impl Engine {
                 }
                 if target == Some(rid) && keyframe {
                     debug!(identity = %s.identity, track = %track_sid, ?rid, "following layer");
+                    layer_started = d.layer.is_none();
                     d.layer = Some(rid);
                     // Carry on the outgoing stream from the old layer's
                     // last packet, as if this one came next.
@@ -3881,7 +3931,22 @@ impl Engine {
                 continue;
             };
             d.last_out = Some((out_seq, out_ts, now));
+            let resumed = (layer_started && d.stream_state != StreamState::Active).then(|| {
+                d.stream_state = StreamState::Active;
+                lk::StreamStateInfo {
+                    participant_sid: d.publisher_sid.clone(),
+                    track_sid: d.track_sid.clone(),
+                    state: lk::StreamState::Active as i32,
+                }
+            });
             let first = !std::mem::replace(&mut d.told_publisher, true);
+            if let Some(info) = resumed {
+                s.send(signal_response::Message::StreamStateUpdate(
+                    lk::StreamStateUpdate {
+                        stream_states: vec![info],
+                    },
+                ));
+            }
             self.forwarded(j, 1, pkt.payload.len() as u64, first.then_some(&track_sid));
         }
         for layer in want_keyframe {
@@ -4631,19 +4696,35 @@ impl Engine {
                 self.disconnect(i, lk::DisconnectReason::RoomClosed);
             }
         }
+        // Stopping: everyone still here leaves, as LiveKit's
+        // `RoomManager.Stop` closing every room.
+        if self.shutdown.is_some() {
+            let staying: Vec<usize> = self
+                .rooms
+                .values()
+                .flat_map(|r| r.members.iter().copied())
+                .filter(|&i| !self.participants[i].closing)
+                .collect();
+            for i in staying {
+                self.disconnect(i, lk::DisconnectReason::ServerShutdown);
+            }
+        }
+        let shutting_down = self.shutdown.is_some();
         let before = self.rooms.len();
         let placement = Arc::clone(&self.placement);
         let (webhooks, participants) = (&self.webhooks, &self.participants);
         let lk = &self.metrics.lk;
         self.rooms.retain(|name, r| {
-            let keep = !r.expired(participants, now);
+            let keep = !(r.expired(participants, now) || shutting_down && r.members.is_empty());
             if !keep {
                 info!(room = %name, "room closed");
                 lk.room_duration
                     .observe(&[], r.created.elapsed().unwrap_or_default().as_secs_f64());
                 placement.leave(name);
                 if let Some(w) = webhooks {
-                    let reason = if r.deleted {
+                    let reason = if shutting_down {
+                        lk::RoomEndReason::RoomEndServerShutdown
+                    } else if r.deleted {
                         lk::RoomEndReason::RoomEndApiDelete
                     } else {
                         lk::RoomEndReason::RoomEndIdleTimeout
@@ -4660,6 +4741,13 @@ impl Engine {
         });
         if self.rooms.len() != before {
             self.membership_changed = true;
+        }
+        if self.rooms.is_empty()
+            && let Some(replies) = self.shutdown.as_mut()
+        {
+            for reply in replies.drain(..) {
+                let _ = reply.send(Ok(admin::AdminReply::Done));
+            }
         }
     }
 }
@@ -4945,6 +5033,7 @@ fn new_downtrack(
         layer: None,
         max_layer: prefs.max_layer(t),
         hold: allocator::Hold::default(),
+        stream_state: StreamState::Inactive,
         svc: video::SvcDown::default(),
         cannot_primary: false,
         on_backup: false,

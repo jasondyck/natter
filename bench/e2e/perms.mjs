@@ -61,7 +61,9 @@ const subs = {};
 const report = async (step) => {
   console.log(`== ${step}`);
   for (const [n, p] of Object.entries(subs)) {
-    const evs = await p.evaluate(() => window.events.splice(0));
+    // Sorted: LiveKit re-checks a publisher's tracks in Go map order, so
+    // the order of one step's events differs from run to run.
+    const evs = (await p.evaluate(() => window.events.splice(0))).sort();
     console.log(`  ${n}: ${await state(p)}  events: ${evs.join('; ') || '-'}`);
   }
 };

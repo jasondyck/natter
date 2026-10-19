@@ -31,6 +31,9 @@ pub enum AdminOp {
     CreateDispatch(lk::AgentDispatch),
     DeleteDispatch(lk::DeleteAgentDispatchRequest),
     ListDispatch(lk::ListAgentDispatchRequest),
+    /// The server is stopping: close every room (SERVER_SHUTDOWN), and
+    /// answer once they have all gone.
+    Shutdown,
 }
 
 #[derive(Debug)]
@@ -190,6 +193,12 @@ impl Engine {
             AdminOp::CreateDispatch(d) => self.create_dispatch(d),
             AdminOp::DeleteDispatch(req) => self.delete_dispatch(req),
             AdminOp::ListDispatch(req) => self.list_dispatch(&req),
+            AdminOp::Shutdown => {
+                info!(rooms = self.rooms.len(), "shutting down");
+                // Answered by `reap` once the rooms have gone.
+                self.shutdown.get_or_insert_default().push(reply);
+                return;
+            }
         };
         let _ = reply.send(result);
     }

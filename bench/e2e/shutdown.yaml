@@ -1,0 +1,5 @@
+# For shutdown.mjs: webhooks to the receiver the script runs.
+webhook:
+  api_key: devkey
+  urls:
+    - http://127.0.0.1:8797/hook

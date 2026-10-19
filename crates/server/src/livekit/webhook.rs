@@ -14,6 +14,7 @@
 //! (no `Bearer`), so LiveKit's `webhook.Receive` verifies it.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -73,6 +74,8 @@ impl Config {
 pub struct Webhooks {
     tx: mpsc::UnboundedSender<lk::WebhookEvent>,
     config: Arc<Config>,
+    /// Deliveries (an event to one URL) queued and not yet done.
+    pending: Arc<AtomicUsize>,
 }
 
 impl Webhooks {
@@ -89,10 +92,32 @@ impl Webhooks {
             }
         }
         let config = Arc::new(config);
+        let pending = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(dispatch(rx, Arc::clone(&config)));
+        tokio::spawn(dispatch(rx, Arc::clone(&config), Arc::clone(&pending)));
         info!(urls = ?config.urls, "webhooks on");
-        Ok(Webhooks { tx, config })
+        Ok(Webhooks {
+            tx,
+            config,
+            pending,
+        })
+    }
+
+    /// Waits up to `wait` for queued events to be delivered (or given up
+    /// on), so the last ones (`room_finished`) go out before the process
+    /// exits.
+    pub async fn flush(&self, wait: Duration) {
+        let deadline = Instant::now() + wait;
+        while self.pending.load(Ordering::Acquire) > 0 {
+            if Instant::now() >= deadline {
+                warn!(
+                    pending = self.pending.load(Ordering::Acquire),
+                    "stopping with webhooks undelivered"
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Queues an event, stamped with its id and time.
@@ -102,7 +127,12 @@ impl Webhooks {
         }
         event.id = ids::new("EV_");
         event.created_at = crate::util::unix_secs() as i64;
-        let _ = self.tx.send(event);
+        self.pending
+            .fetch_add(self.config.urls.len(), Ordering::AcqRel);
+        if self.tx.send(event).is_err() {
+            self.pending
+                .fetch_sub(self.config.urls.len(), Ordering::AcqRel);
+        }
     }
 }
 
@@ -122,7 +152,11 @@ fn event_key(e: &lk::WebhookEvent) -> String {
 
 type Queues = Arc<Mutex<HashMap<(usize, String), VecDeque<(Instant, lk::WebhookEvent)>>>>;
 
-async fn dispatch(mut rx: mpsc::UnboundedReceiver<lk::WebhookEvent>, config: Arc<Config>) {
+async fn dispatch(
+    mut rx: mpsc::UnboundedReceiver<lk::WebhookEvent>,
+    config: Arc<Config>,
+    pending: Arc<AtomicUsize>,
+) {
     let client = Client::new();
     let queues: Queues = Arc::default();
     while let Some(event) = rx.recv().await {
@@ -134,6 +168,7 @@ async fn dispatch(mut rx: mpsc::UnboundedReceiver<lk::WebhookEvent>, config: Arc
             let queue = entry.or_default();
             if queue.len() >= MAX_DEPTH {
                 info!(event = %event.event, url = %config.urls[url], "dropped webhook: queue is full");
+                pending.fetch_sub(1, Ordering::AcqRel);
                 continue;
             }
             queue.push_back((Instant::now(), event.clone()));
@@ -145,13 +180,20 @@ async fn dispatch(mut rx: mpsc::UnboundedReceiver<lk::WebhookEvent>, config: Arc
                     (url, key.clone()),
                     client.clone(),
                     Arc::clone(&config),
+                    Arc::clone(&pending),
                 ));
             }
         }
     }
 }
 
-async fn worker(queues: Queues, key: (usize, String), client: Client, config: Arc<Config>) {
+async fn worker(
+    queues: Queues,
+    key: (usize, String),
+    client: Client,
+    config: Arc<Config>,
+    pending: Arc<AtomicUsize>,
+) {
     let url = &config.urls[key.0];
     loop {
         let next = {
@@ -167,12 +209,13 @@ async fn worker(queues: Queues, key: (usize, String), client: Client, config: Ar
         let (queued_at, event) = next;
         if queued_at.elapsed() > MAX_AGE {
             info!(event = %event.event, %url, "dropped webhook: too old");
-            continue;
+        } else {
+            match send(&client, url, &config, &event).await {
+                Ok(status) => info!(event = %event.event, %url, %status, "sent webhook"),
+                Err(e) => warn!(event = %event.event, %url, "failed to send webhook: {e}"),
+            }
         }
-        match send(&client, url, &config, &event).await {
-            Ok(status) => info!(event = %event.event, %url, %status, "sent webhook"),
-            Err(e) => warn!(event = %event.event, %url, "failed to send webhook: {e}"),
-        }
+        pending.fetch_sub(1, Ordering::AcqRel);
     }
 }
 

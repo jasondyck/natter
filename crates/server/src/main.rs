@@ -381,6 +381,7 @@ async fn main() -> Result<()> {
         auth,
         metrics,
     };
+    let engine = state.rtc.engine.clone();
     let whip_limit = axum::extract::DefaultBodyLimit::max(livekit::whip::MAX_BODY);
     let app = Router::new()
         .route("/rtc", get(livekit::signal::rtc))
@@ -521,6 +522,14 @@ async fn main() -> Result<()> {
     shutdown_signal().await;
     if let Some(c) = &cluster {
         c.drain().await;
+    }
+    // As LiveKit's `RoomManager.Stop`: every room closes (SERVER_SHUTDOWN),
+    // and its last webhooks get a moment to go out (both waits chosen).
+    engine.shutdown(Duration::from_secs(5)).await;
+    if let Some(w) = &webhooks {
+        w.flush(Duration::from_secs(5)).await;
+    }
+    if let Some(c) = &cluster {
         c.stop().await;
     }
     let _ = stop_tx.send(());
