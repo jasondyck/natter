@@ -3,8 +3,8 @@
 Goal: natter is a drop-in replacement for the open-source LiveKit server
 v1.13.10 core SFU. LiveKit's own SDKs (JS, Swift, Kotlin, Flutter, Rust,
 Unity), `lk` and its load tester connect to natter unchanged and get the
-same behaviour. Egress, Ingress, SIP, Agents hosting and multi-node Redis
-come later, if ever.
+same behaviour. Egress, Ingress, SIP and hosting agents come later, if
+ever.
 
 Reference material in this directory, all from the v1.13.10 tag and the
 `livekit/protocol` commit it pins (`9bb708cdb819`):
