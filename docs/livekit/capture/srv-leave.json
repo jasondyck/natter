@@ -1,0 +1,6 @@
+{
+ "leave": {
+  "reason": "CLIENT_INITIATED",
+  "action": "DISCONNECT"
+ }
+}

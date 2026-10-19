@@ -1,0 +1,15 @@
+joining 10 clients: 2 rooms × (2 publishers + 3 subscribers)
+ready: 4/4 publishers sending, 6/6 subscribers hearing all 2 publishers
+warming up for 6s
+measuring for 15s
+downlink now 1000 kbit/s
+Livekit at http://127.0.0.1:7880: 2 rooms × (2 + 3) video, 15.0s measured
+  clients   10 joined of 10; ready: 4 publishers, 6 subscribers; setup p50 124 ms, p99 126 ms
+  packets   1800 sent, 5014 of 5400 receipts (7.148% lost), 2 duplicates, 713 later than 100 ms
+  video     1500 kbit/s at 30 fps; 318 undecodable (5.889%), 22 keyframes, 22 keyframe requests to publishers, 26 PLIs from subscribers
+  layers    frames received on q 31.1%, h 47.0%, f 21.8%
+  downlink  1512 packets dropped by the full queue
+  latency   p50 18.88 ms, p90 298.24, p99 811.52, p99.9 1079.30, max 1167.36
+  rate      334 forwarded/s
+  server    1.7% of a core, 51.9 µs per forward, 24 MiB
+  load gen  2.4% of a core, 24 MiB

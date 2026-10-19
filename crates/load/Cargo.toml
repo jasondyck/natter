@@ -1,0 +1,30 @@
+[package]
+name = "natter-load"
+description = "WebRTC load generator (audio, VP8 video): one client for natter, LiveKit and other SFUs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+# Pure-Rust DTLS, as the server (see rtc_config::install_crypto there).
+dimpl = { version = "0.7", default-features = false, features = ["rust-crypto"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+hdrhistogram = { version = "7", default-features = false }
+hmac = "0.13"
+libc = "0.2"
+livekit-protocol = "=0.8.1"
+mio = { version = "1", features = ["net", "os-poll"] }
+prost = "0.14"
+# Loopback benchmarks only: plain HTTP and WebSocket, no TLS.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+sha2 = "0.11"
+str0m = { version = "0.24", default-features = false, features = ["rust-crypto"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = "0.29"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

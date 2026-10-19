@@ -1,0 +1,20 @@
+{
+ "trackPublished": {
+  "cid": "TR_eQT7m7fJ7HWe",
+  "track": {
+   "sid": "TR_AMLmhMStMpnYng",
+   "type": "AUDIO",
+   "name": "<redacted>",
+   "source": "MICROPHONE",
+   "codecs": [
+    {
+     "cid": "TR_eQT7m7fJ7HWe",
+     "videoLayerMode": "ONE_SPATIAL_LAYER_PER_STREAM"
+    }
+   ],
+   "encryption": "NONE",
+   "stream": "camera",
+   "backupCodecPolicy": "SIMULCAST"
+  }
+ }
+}

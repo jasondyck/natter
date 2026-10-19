@@ -1,0 +1,190 @@
+--- upstream/examples/chat.rs
++++ src/main.rs
+@@ -21,8 +21,6 @@
+ use str0m::net::Protocol;
+ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcError, net::Receive};
+ 
+-mod util;
+-
+ fn init_log() {
+     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+ 
+@@ -40,43 +38,48 @@
+ 
+     // Run with whatever is configured.
+     from_feature_flags().install_process_default();
++    // [bench] DTLS on RustCrypto too, as natter (`rtc_config::install_crypto`).
++    dimpl::crypto::CryptoProvider::install_default(dimpl::crypto::rust_crypto::default_provider());
+ 
+-    let certificate = include_bytes!("cer.pem").to_vec();
+-    let private_key = include_bytes!("key.pem").to_vec();
+-
+-    // Figure out some public IP address, since Firefox will not accept 127.0.0.1 for WebRTC traffic.
+-    let host_addr = util::select_host_address();
++    // [bench] Addresses from the environment instead of the first public
++    // interface and port 3000, and plain HTTP instead of TLS.
++    let udp = std::env::var("CHAT_UDP").unwrap_or("127.0.0.1:0".into());
++    let http = std::env::var("CHAT_HTTP").unwrap_or("127.0.0.1:3000".into());
+ 
+-    let (tx, rx) = mpsc::sync_channel(1);
++    let (tx, rx) = mpsc::sync_channel::<Joined>(1);
+ 
+     // Spin up a UDP socket for the RTC. All WebRTC traffic is going to be multiplexed over this single
+     // server socket. Clients are identified via their respective remote (UDP) socket address.
+-    let socket = UdpSocket::bind(format!("{host_addr}:0")).expect("binding a random UDP port");
++    let socket = UdpSocket::bind(udp).expect("binding a random UDP port");
+     let addr = socket.local_addr().expect("a local socket address");
+     info!("Bound UDP port: {}", addr);
+ 
+     // The run loop is on a separate thread to the web server.
+     thread::spawn(move || run(socket, rx));
+ 
+-    let server = Server::new_ssl(
+-        "0.0.0.0:3000",
+-        move |request| web_request(request, addr, tx.clone()),
+-        certificate,
+-        private_key,
+-    )
++    let server = Server::new(http, move |request| {
++        web_request(request, addr, tx.clone())
++    })
+     .expect("starting the web server");
+ 
+     let port = server.server_addr().port();
+-    info!("Connect a browser to https://{:?}:{:?}", addr.ip(), port);
++    info!("Signalling on http://{:?}:{:?}", addr.ip(), port);
+ 
+     server.run();
+ }
+ 
+ // Handle a web request.
+-fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<Rtc>) -> Response {
++fn web_request(request: &Request, addr: SocketAddr, tx: SyncSender<Joined>) -> Response {
+     if request.method() == "GET" {
+-        return Response::html(include_str!("chat.html"));
++        return Response::empty_404();
+     }
++    // [bench] `?room=` keeps clients apart; `?recv=0` is a client that only
++    // publishes, so nothing is forwarded to it.
++    let joined = Joined {
++        room: request.get_param("room").unwrap_or_default(),
++        receive: request.get_param("recv").as_deref() != Some("0"),
++        rtc: None,
++    };
+ 
+     // Expected POST SDP Offers.
+     let mut data = request.data().expect("body to be available");
+@@ -99,7 +102,11 @@
+         .expect("offer to be accepted");
+ 
+     // The Rtc instance is shipped off to the main run loop.
+-    tx.send(rtc).expect("to send Rtc instance");
++    let joined = Joined {
++        rtc: Some(rtc),
++        ..joined
++    };
++    tx.send(joined).expect("to send Rtc instance");
+ 
+     let body = serde_json::to_vec(&answer).expect("answer to serialize");
+ 
+@@ -108,7 +115,7 @@
+ 
+ /// This is the "main run loop" that handles all clients, reads and writes UdpSocket traffic,
+ /// and forwards media data between clients.
+-fn run(socket: UdpSocket, rx: Receiver<Rtc>) -> Result<(), RtcError> {
++fn run(socket: UdpSocket, rx: Receiver<Joined>) -> Result<(), RtcError> {
+     let mut clients: Vec<Client> = vec![];
+     let mut to_propagate: VecDeque<Propagated> = VecDeque::new();
+     let mut buf = vec![0; 2000];
+@@ -120,7 +127,12 @@
+         // Spawn new incoming clients from the web server thread.
+         if let Some(mut client) = spawn_new_client(&rx) {
+             // Add incoming tracks present in other already connected clients.
+-            for track in clients.iter().flat_map(|c| c.tracks_in.iter()) {
++            let (room, receive) = (client.room.clone(), client.receive);
++            for track in clients
++                .iter()
++                .filter(|c| c.room == room && receive)
++                .flat_map(|c| c.tracks_in.iter())
++            {
+                 let weak = Arc::downgrade(&track.id);
+                 client.handle_track_open(weak);
+             }
+@@ -170,10 +182,10 @@
+ }
+ 
+ /// Receive new clients from the receiver and create new Client instances.
+-fn spawn_new_client(rx: &Receiver<Rtc>) -> Option<Client> {
++fn spawn_new_client(rx: &Receiver<Joined>) -> Option<Client> {
+     // try_recv here won't lock up the thread.
+     match rx.try_recv() {
+-        Ok(rtc) => Some(Client::new(rtc)),
++        Ok(joined) => Some(Client::new(joined)),
+         Err(TryRecvError::Empty) => None,
+         _ => panic!("Receiver<Rtc> disconnected"),
+     }
+@@ -210,15 +222,28 @@
+         // (it's either a noop or a timeout).
+         return;
+     };
++    let Some(room) = clients
++        .iter()
++        .find(|c| c.id == client_id)
++        .map(|c| c.room.clone())
++    else {
++        return;
++    };
+ 
+     for client in &mut *clients {
+         if client.id == client_id {
+             // Do not propagate to originating client.
+             continue;
+         }
++        if client.room != room {
++            continue;
++        }
+ 
+         match &propagated {
+-            Propagated::TrackOpen(_, track_in) => client.handle_track_open(track_in.clone()),
++            Propagated::TrackOpen(_, track_in) if client.receive => {
++                client.handle_track_open(track_in.clone())
++            }
++            Propagated::TrackOpen(..) => {}
+             Propagated::MediaData(_, data) => client.handle_media_data_out(client_id, data),
+             Propagated::KeyframeRequest(_, req, origin, mid_in) => {
+                 // Only one origin client handles the keyframe request.
+@@ -263,9 +288,18 @@
+     }
+ }
+ 
++/// [bench] A new client, its room, and whether it takes others' media.
++struct Joined {
++    room: String,
++    receive: bool,
++    rtc: Option<Rtc>,
++}
++
+ #[derive(Debug)]
+ struct Client {
+     id: ClientId,
++    room: String,
++    receive: bool,
+     rtc: Rtc,
+     pending: Option<SdpPendingOffer>,
+     cid: Option<ChannelId>,
+@@ -326,11 +360,14 @@
+ }
+ 
+ impl Client {
+-    fn new(rtc: Rtc) -> Client {
++    fn new(joined: Joined) -> Client {
++        let rtc = joined.rtc.expect("joined with an Rtc");
+         static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+         let next_id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+         Client {
+             id: ClientId(next_id),
++            room: joined.room,
++            receive: joined.receive,
+             rtc,
+             pending: None,
+             cid: None,

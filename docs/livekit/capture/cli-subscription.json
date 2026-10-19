@@ -1,0 +1,13 @@
+{
+ "subscription": {
+  "subscribe": true,
+  "participantTracks": [
+   {
+    "participantSid": "PA_4UuBz8zDWCJ3",
+    "trackSids": [
+     "TR_AMLmhMStMpnYng"
+    ]
+   }
+  ]
+ }
+}

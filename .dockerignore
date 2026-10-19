@@ -1,0 +1,5 @@
+.git
+target
+crates/client/dist
+data
+deploy

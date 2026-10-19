@@ -1,0 +1,110 @@
+{
+ "join": {
+  "room": {
+   "sid": "RM_6LCs4XTs3zkc",
+   "name": "cap",
+   "emptyTimeout": 300,
+   "departureTimeout": 20,
+   "creationTime": 1792269468,
+   "creationTimeMs": 1792269468929,
+   "turnPassword": "RvfWnPMNQgdweUqlZNpe7x46L7BKRD2FpqPsJg2QMsdB",
+   "enabledCodecs": [
+    {
+     "mime": "audio/PCMU"
+    },
+    {
+     "mime": "audio/PCMA"
+    },
+    {
+     "mime": "audio/opus"
+    },
+    {
+     "mime": "audio/red"
+    },
+    {
+     "mime": "video/VP8"
+    },
+    {
+     "mime": "video/H264"
+    },
+    {
+     "mime": "video/VP9"
+    },
+    {
+     "mime": "video/AV1"
+    },
+    {
+     "mime": "video/H265"
+    },
+    {
+     "mime": "video/rtx"
+    }
+   ]
+  },
+  "participant": {
+   "sid": "PA_4UuBz8zDWCJ3",
+   "identity": "murdb_pub_0",
+   "state": "JOINING",
+   "joinedAt": 1792269468,
+   "joinedAtMs": 1792269468929,
+   "permission": {
+    "canSubscribe": true,
+    "canPublish": true,
+    "canPublishData": true
+   },
+   "kind": "STANDARD",
+   "disconnectReason": "UNKNOWN_REASON"
+  },
+  "serverVersion": "1.13.10",
+  "iceServers": [
+   {
+    "urls": [
+     "stun:global.stun.twilio.com:3478",
+     "stun:stun.l.google.com:19302",
+     "stun:stun1.l.google.com:19302"
+    ]
+   }
+  ],
+  "subscriberPrimary": true,
+  "pingTimeout": 15,
+  "pingInterval": 5,
+  "serverInfo": {
+   "edition": "Standard",
+   "version": "1.13.10",
+   "protocol": 17,
+   "nodeID": "ND_UsKiKjJAFK96",
+   "agentProtocol": 1
+  },
+  "sifTrailer": "OHp0dUllQjNkNmdKaHZkU2xadnBreEJ4VDBJUlZhblRldnl0Y3A5bW5PMA",
+  "enabledPublishCodecs": [
+   {
+    "mime": "video/VP8"
+   },
+   {
+    "mime": "video/H264"
+   },
+   {
+    "mime": "video/VP9"
+   },
+   {
+    "mime": "video/AV1"
+   },
+   {
+    "mime": "video/H265"
+   },
+   {
+    "mime": "audio/PCMU"
+   },
+   {
+    "mime": "audio/PCMA"
+   },
+   {
+    "mime": "audio/opus"
+   },
+   {
+    "mime": "audio/red"
+   }
+  ],
+  "fastPublish": true
+ }
+}

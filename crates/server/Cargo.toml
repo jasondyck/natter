@@ -1,0 +1,75 @@
+[package]
+name = "natter-server"
+description = "Signalling server and str0m SFU for natter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# aws-lc (C and assembly) as an optional DTLS backend; without it the server
+# has no C dependency.
+aws-lc = ["dimpl/aws-lc-rs"]
+# TURN over TLS terminated by natter itself (rustls on aws-lc). Without it,
+# TLS can be terminated in front of natter and forwarded to the TURN port.
+tls = ["dep:rustls", "dep:hyper-rustls"]
+
+[dependencies]
+natter-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow = "1"
+base64 = "0.22"
+axum = { version = "0.8", features = ["macros", "ws"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
+getrandom = "0.4"
+hex = "0.4"
+hmac = "0.13"
+# TURN: STUN MESSAGE-INTEGRITY (HMAC-SHA1), the long-term key (MD5) and
+# FINGERPRINT (CRC-32), as the RFCs fix them.
+sha1 = "0.11"
+md-5 = "0.11"
+crc32fast = "1"
+rustls = { version = "0.23", optional = true }
+# Webhooks: an HTTP client (https with the `tls` feature).
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+hyper-rustls = { version = "0.27", optional = true, default-features = false, features = ["http1", "webpki-roots", "aws-lc-rs", "tls12", "logging"] }
+# Gzipped /rtc/v1 join requests (pure-Rust miniz_oxide backend).
+flate2 = "1"
+# LiveKit's wire types, generated from the same protos the LiveKit server
+# v1.13.10 pins (checked identical). prost + pbjson, no protoc.
+livekit-protocol = "=0.8.1"
+prost = "0.14"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+redb = "4"
+sha2 = "0.11"
+# Pure-Rust DTLS/SRTP instead of the default aws-lc-rs (C).
+str0m = { version = "0.24", default-features = false, features = ["rust-crypto"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+# ICE/TCP: the per-engine TCP thread (livekit::tcp).
+mio = { version = "1", features = ["net", "os-poll"] }
+tower-http = { version = "0.6", features = ["fs", "set-header", "trace"] }
+# Its RustCrypto provider, with P-256 signatures on p256 0.14 (precomputed
+# tables; dimpl itself is on 0.13), see livekit::dtls_crypto; or, built with
+# the `aws-lc` feature, its aws-lc one (NATTER_DTLS_CRYPTO=aws-lc).
+dimpl = { version = "0.7", default-features = false, features = ["rust-crypto"] }
+der = "0.7"
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "pkcs8", "precomputed-tables", "std"] }
+x509-cert = { version = "0.2", default-features = false }
+socket2 = "0.6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-normalization = "0.1"
+unicode-security = "0.1"
+url = "2"
+uuid = { version = "1", features = ["serde", "v4"] }
+# 0.6 replaced OpenSSL with RustCrypto. Still a pre-release, so pinned.
+webauthn-rs = { version = "=0.6.1-dev", default-features = false }
+prost-reflect = { version = "0.16.5", features = ["serde"] }
+serde-saphyr = "2"
+redis = { version = "1.7", default-features = false, features = ["tokio-comp", "connection-manager", "script"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
+
+[build-dependencies]
+protox = "0.10.0"

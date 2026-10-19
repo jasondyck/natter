@@ -1,0 +1,15 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+# `trunk serve` on :8081 for UI work, with signalling proxied to the server.
+[serve]
+port = 8081
+
+[[proxy]]
+backend = "ws://127.0.0.1:8080/rtc"
+ws = true
+
+[[proxy]]
+backend = "http://127.0.0.1:8080/api"
+

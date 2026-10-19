@@ -1,0 +1,11 @@
+joining 16 clients: 2 rooms × (4 publishers + 4 subscribers)
+ready: 8/8 publishers sending, 8/8 subscribers hearing all 4 publishers
+warming up for 5s
+measuring for 15s
+Livekit at http://127.0.0.1:7880: 2 rooms × (4 + 4), 15.0s measured
+  clients   16 joined of 16; ready: 8 publishers, 8 subscribers; setup p50 163 ms, p99 360 ms
+  packets   6001 sent, 24004 of 24004 receipts (0.000% lost), 0 duplicates, 0 later than 100 ms
+  latency   p50 0.05 ms, p90 0.07, p99 0.10, p99.9 0.15, max 0.42
+  rate      1600 forwarded/s
+  server    1.6% of a core, 10.0 µs per forward, 24 MiB
+  load gen  2.0% of a core, 21 MiB

@@ -1,0 +1,17 @@
+v=0
+o=- 6697397951749050788 1792269468 IN IP4 0.0.0.0
+s=-
+t=0 0
+a=msid-semantic:WMS *
+a=fingerprint:sha-256 22:17:E3:74:44:7B:6B:22:92:0D:35:A2:C3:8A:63:B3:52:82:5F:16:6B:3F:9B:29:14:2F:B6:84:8C:B1:44:04
+a=extmap-allow-mixed
+a=group:BUNDLE 0
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+c=IN IP4 0.0.0.0
+a=setup:active
+a=mid:0
+a=sendrecv
+a=sctp-port:5000
+a=max-message-size:65535
+a=ice-ufrag:klMIZtPPvBffkEnw
+a=ice-pwd:WHGCQqzKMeGCNjuofhZDqUdVsggWzVSJ

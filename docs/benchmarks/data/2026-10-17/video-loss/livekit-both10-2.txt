@@ -1,0 +1,13 @@
+joining 24 clients: 4 rooms × (2 publishers + 4 subscribers)
+ready: 8/8 publishers sending, 16/16 subscribers hearing all 2 publishers
+warming up for 5s
+measuring for 20s
+Livekit at http://127.0.0.1:7880: 4 rooms × (2 + 4) video, 20.0s measured
+  clients   24 joined of 24; ready: 8 publishers, 16 subscribers; setup p50 171 ms, p99 182 ms
+  packets   4800 sent, 18866 of 19200 receipts (1.740% lost), 0 duplicates, 12961 later than 100 ms
+  video     1500 kbit/s at 30 fps; 2083 undecodable (10.849%), 85 keyframes, 85 keyframe requests to publishers, 145 PLIs from subscribers
+  injected  10% down (18618 dropped), 10% up (5847 dropped)
+  latency   p50 120.89 ms, p90 255.74, p99 500.22, p99.9 501.25, max 501.25
+  rate      943 forwarded/s
+  server    10.5% of a core, 111.2 µs per forward, 115 MiB
+  load gen  7.8% of a core, 32 MiB

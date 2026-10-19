@@ -1,0 +1,66 @@
+[package]
+name = "natter-client"
+description = "Browser client for natter: Leptos UI over the browser's WebRTC API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+natter-protocol.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+console_error_panic_hook = "0.1"
+serde.workspace = true
+# LiveKit's wire types, as the server uses; the client speaks /rtc/v1.
+livekit-protocol = "=0.8.1"
+prost = "0.14"
+js-sys = "0.3"
+leptos = { version = "0.8", features = ["csr"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+  "BinaryType",
+  "Clipboard",
+  "CloseEvent",
+  "CredentialCreationOptions",
+  "CredentialRequestOptions",
+  "CredentialsContainer",
+  "Document",
+  "Headers",
+  "History",
+  "HtmlAudioElement",
+  "HtmlElement",
+  "HtmlMediaElement",
+  "Location",
+  "MediaDevices",
+  "MediaStream",
+  "MediaStreamConstraints",
+  "MediaStreamTrack",
+  "MessageEvent",
+  "Navigator",
+  "Request",
+  "RequestCredentials",
+  "RequestInit",
+  "Response",
+  "RtcIceCandidate",
+  "RtcIceCandidateInit",
+  "RtcConfiguration",
+  "RtcIceServer",
+  "RtcOfferOptions",
+  "RtcPeerConnection",
+  "RtcPeerConnectionIceEvent",
+  "RtcPeerConnectionState",
+  "RtcRtpTransceiver",
+  "RtcRtpTransceiverDirection",
+  "RtcRtpTransceiverInit",
+  "RtcSdpType",
+  "RtcSessionDescription",
+  "RtcSessionDescriptionInit",
+  "RtcTrackEvent",
+  "Storage",
+  "WebSocket",
+  "Window",
+]

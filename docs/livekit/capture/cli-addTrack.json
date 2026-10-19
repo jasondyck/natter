@@ -1,0 +1,10 @@
+{
+ "addTrack": {
+  "cid": "TR_eQT7m7fJ7HWe",
+  "name": "audio",
+  "type": "AUDIO",
+  "source": "MICROPHONE",
+  "encryption": "NONE",
+  "backupCodecPolicy": "PREFER_REGRESSION"
+ }
+}

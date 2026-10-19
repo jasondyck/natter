@@ -1,0 +1,11 @@
+joining 128 clients: 16 rooms × (4 publishers + 4 subscribers)
+ready: 64/64 publishers sending, 63/64 subscribers hearing all 4 publishers
+warming up for 5s
+measuring for 15s
+Str0mChat at http://127.0.0.1:3900: 16 rooms × (4 + 4), 15.0s measured
+  clients   128 joined of 128; ready: 64 publishers, 63 subscribers; setup p50 122 ms, p99 1234 ms
+  packets   48011 sent, 101963 of 192044 receipts (46.906% lost), 0 duplicates, 100596 later than 100 ms
+  latency   p50 344.83 ms, p90 502.78, p99 596.99, p99.9 714.24, max 803.33
+  rate      6797 forwarded/s
+  server    81.5% of a core, 119.8 µs per forward, 30 MiB
+  load gen  9.3% of a core, 33 MiB

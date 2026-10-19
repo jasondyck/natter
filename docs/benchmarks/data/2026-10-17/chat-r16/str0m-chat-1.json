@@ -1,0 +1,42 @@
+{
+  "target": "Str0mChat",
+  "url": "http://127.0.0.1:3900",
+  "rooms": 16,
+  "publishers": 4,
+  "subscribers": 4,
+  "clients": 128,
+  "clients_per_room": 8,
+  "join_failures": 0,
+  "publishers_ready": 64,
+  "subscribers_ready": 63,
+  "setup_ms_p50": 122,
+  "setup_ms_p99": 1234,
+  "measured_s": 15.002005822,
+  "packets_sent": 48011,
+  "receipts_expected": 192044,
+  "receipts_unique": 101963,
+  "loss_percent": 46.9064381079336,
+  "duplicates": 0,
+  "late": 100596,
+  "forwarded_per_s": 6796.6244787396545,
+  "latency_ms_p50": 344.831,
+  "latency_ms_p90": 502.783,
+  "latency_ms_p99": 596.991,
+  "latency_ms_p999": 714.239,
+  "latency_ms_max": 803.327,
+  "loss_down_percent": 0.0,
+  "loss_up_percent": 0.0,
+  "dropped_down": 0,
+  "dropped_up": 0,
+  "send_errors": 0,
+  "server": {
+    "cpu_percent": 81.45577428106134,
+    "cpu_us_per_forward": 119.84739562390278,
+    "memory_mib": 30.31640625
+  },
+  "load_generator": {
+    "cpu_percent": 9.265427680087992,
+    "cpu_us_per_forward": 13.632396065239353,
+    "memory_mib": 33.1484375
+  }
+}

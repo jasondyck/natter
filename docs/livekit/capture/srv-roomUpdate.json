@@ -1,0 +1,47 @@
+{
+ "roomUpdate": {
+  "room": {
+   "sid": "RM_6LCs4XTs3zkc",
+   "name": "cap",
+   "emptyTimeout": 300,
+   "departureTimeout": 20,
+   "creationTime": 1792269468,
+   "creationTimeMs": 1792269468929,
+   "turnPassword": "RvfWnPMNQgdweUqlZNpe7x46L7BKRD2FpqPsJg2QMsdB",
+   "enabledCodecs": [
+    {
+     "mime": "audio/PCMU"
+    },
+    {
+     "mime": "audio/PCMA"
+    },
+    {
+     "mime": "audio/opus"
+    },
+    {
+     "mime": "audio/red"
+    },
+    {
+     "mime": "video/VP8"
+    },
+    {
+     "mime": "video/H264"
+    },
+    {
+     "mime": "video/VP9"
+    },
+    {
+     "mime": "video/AV1"
+    },
+    {
+     "mime": "video/H265"
+    },
+    {
+     "mime": "video/rtx"
+    }
+   ],
+   "numParticipants": 2,
+   "numPublishers": 1
+  }
+ }
+}

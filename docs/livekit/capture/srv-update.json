@@ -1,0 +1,46 @@
+{
+ "update": {
+  "participants": [
+   {
+    "sid": "PA_4UuBz8zDWCJ3",
+    "identity": "murdb_pub_0",
+    "state": "ACTIVE",
+    "tracks": [
+     {
+      "sid": "TR_AMLmhMStMpnYng",
+      "type": "AUDIO",
+      "name": "<redacted>",
+      "source": "MICROPHONE",
+      "mimeType": "audio/opus",
+      "mid": "0",
+      "codecs": [
+       {
+        "mimeType": "audio/opus",
+        "mid": "0",
+        "cid": "TR_eQT7m7fJ7HWe",
+        "videoLayerMode": "ONE_SPATIAL_LAYER_PER_STREAM"
+       }
+      ],
+      "encryption": "NONE",
+      "stream": "camera",
+      "version": {
+       "unixMicro": 1792269468973270
+      },
+      "backupCodecPolicy": "SIMULCAST"
+     }
+    ],
+    "joinedAt": 1792269468,
+    "joinedAtMs": 1792269468929,
+    "version": 3,
+    "permission": {
+     "canSubscribe": true,
+     "canPublish": true,
+     "canPublishData": true
+    },
+    "isPublisher": true,
+    "kind": "STANDARD",
+    "disconnectReason": "UNKNOWN_REASON"
+   }
+  ]
+ }
+}

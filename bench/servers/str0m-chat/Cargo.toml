@@ -1,0 +1,22 @@
+# str0m's `chat` example (0.24.1), patched only so a load test can run
+# many rooms through it. See README.md. Built on its own, against the
+# upstream str0m crate rather than natter's vendored copy.
+[package]
+name = "str0m-chat"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+# The same pure-Rust crypto as natter, so SRTP and DTLS cost the same.
+str0m = { version = "=0.24.1", default-features = false, features = ["rust-crypto"] }
+dimpl = { version = "0.7", default-features = false, features = ["rust-crypto"] }
+rouille = "3.6.2"
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "std"] }
+
+[profile.release]
+lto = "thin"

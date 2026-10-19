@@ -1,0 +1,58 @@
+{
+  "target": "Livekit",
+  "media": "video",
+  "video_kbps": 1500,
+  "fps": 30,
+  "video": {
+    "keyframes": 44,
+    "keyframe_requests": 44,
+    "plis_sent": 29,
+    "undecodable": 350,
+    "layer_frames": [
+      1753,
+      1865,
+      1135
+    ],
+    "link_drops": 2748
+  },
+  "undecodable_percent": 6.481481481481482,
+  "url": "http://127.0.0.1:7880",
+  "rooms": 2,
+  "publishers": 2,
+  "subscribers": 3,
+  "clients": 10,
+  "clients_per_room": 5,
+  "join_failures": 0,
+  "publishers_ready": 4,
+  "subscribers_ready": 6,
+  "setup_ms_p50": 739,
+  "setup_ms_p99": 766,
+  "measured_s": 15.000398232,
+  "packets_sent": 1800,
+  "receipts_expected": 5400,
+  "receipts_unique": 4753,
+  "loss_percent": 11.981481481481481,
+  "duplicates": 5,
+  "late": 4753,
+  "forwarded_per_s": 316.85825446024063,
+  "latency_ms_p50": 188.031,
+  "latency_ms_p90": 573.439,
+  "latency_ms_p99": 1350.655,
+  "latency_ms_p999": 1738.751,
+  "latency_ms_max": 1915.903,
+  "loss_down_percent": 0.0,
+  "loss_up_percent": 0.0,
+  "dropped_down": 0,
+  "dropped_up": 0,
+  "send_errors": 0,
+  "server": {
+    "cpu_percent": 1.9332820070159853,
+    "cpu_us_per_forward": 61.01409636019356,
+    "memory_mib": 26.75
+  },
+  "load_generator": {
+    "cpu_percent": 2.399936284571568,
+    "cpu_us_per_forward": 75.74163686092994,
+    "memory_mib": 24.04296875
+  }
+}

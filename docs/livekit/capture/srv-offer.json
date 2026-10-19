@@ -1,0 +1,7 @@
+{
+ "offer": {
+  "type": "offer",
+  "sdp": "v=0\r\no=- 6858371146259841715 1792269468 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=msid-semantic:WMS *\r\na=fingerprint:sha-256 95:B1:DC:A8:1F:C1:C4:C1:4C:68:9E:F3:CA:AA:A7:31:68:BC:75:B4:20:41:BE:11:04:45:D6:26:5E:26:FD:C6\r\na=extmap-allow-mixed\r\na=group:BUNDLE 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=setup:actpass\r\na=mid:0\r\na=sendrecv\r\na=sctp-port:5000\r\na=max-message-size:65535\r\na=ice-ufrag:hYiTCugyozWIrGsq\r\na=ice-pwd:EaxLpBGmTOJFwGjgFnbTTpxGkUDBPblp\r\n",
+  "id": 253
+ }
+}

@@ -1,0 +1,42 @@
+{
+  "target": "Livekit",
+  "url": "http://127.0.0.1:7880",
+  "rooms": 16,
+  "publishers": 4,
+  "subscribers": 4,
+  "clients": 128,
+  "clients_per_room": 8,
+  "join_failures": 0,
+  "publishers_ready": 64,
+  "subscribers_ready": 64,
+  "setup_ms_p50": 185,
+  "setup_ms_p99": 952,
+  "measured_s": 15.000830487,
+  "packets_sent": 48003,
+  "receipts_expected": 192012,
+  "receipts_unique": 192012,
+  "loss_percent": 0.0,
+  "duplicates": 0,
+  "late": 0,
+  "forwarded_per_s": 12800.091312704399,
+  "latency_ms_p50": 0.096,
+  "latency_ms_p90": 0.193,
+  "latency_ms_p99": 0.29,
+  "latency_ms_p999": 0.389,
+  "latency_ms_max": 1.713,
+  "loss_down_percent": 0.0,
+  "loss_up_percent": 0.0,
+  "dropped_down": 0,
+  "dropped_up": 0,
+  "send_errors": 0,
+  "server": {
+    "cpu_percent": 11.799346719729385,
+    "cpu_us_per_forward": 9.218173864133492,
+    "memory_mib": 79.15625
+  },
+  "load_generator": {
+    "cpu_percent": 13.599247066806749,
+    "cpu_us_per_forward": 10.624335979001312,
+    "memory_mib": 54.671875
+  }
+}

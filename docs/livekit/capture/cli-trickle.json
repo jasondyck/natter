@@ -1,0 +1,6 @@
+{
+ "trickle": {
+  "candidateInit": "{\"candidate\":\"candidate:2062925694 1 udp 2130706431 192.0.2.10 42907 typ host ufrag aqLJwUWzQmASkgOV generation 0\",\"sdpMid\":\"0\",\"sdpMLineIndex\":0,\"usernameFragment\":null}",
+  "target": "SUBSCRIBER"
+ }
+}
