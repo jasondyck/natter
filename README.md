@@ -498,3 +498,14 @@ RustCrypto. The default build has no C dependency in the server.
 [`docs/livekit/PARITY.md`](docs/livekit/PARITY.md) is the plan: LiveKit
 parity phase by phase (resume, sharding over cores, video, simulcast...),
 with what is done ticked.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option. The vendored crates in `vendor/`
+keep their own licenses.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in natter by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions.
