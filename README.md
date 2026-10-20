@@ -165,6 +165,34 @@ that terminates TLS for `NATTER_ORIGIN`, `NATTER_STATIC_DIR` pointing at
 media to (UDP `NATTER_UDP_PORT` must be reachable there). The process keeps
 its database in `NATTER_DATA_DIR`, and only one process can open it.
 
+## With Stoat
+
+[Stoat](https://github.com/stoatchat/self-hosted) runs voice on its own
+LiveKit container (`livekit` in its `compose.yml`), and natter can take its
+place with the same `livekit.yml`. Tested against Stoat 0.15.5's
+self-hosted stack: its API's `join_call`, its web client in a voice channel,
+and its `voice-ingress` events (join, leave, mute, unmute) all as with its
+LiveKit. A `compose.override.yml` beside Stoat's:
+
+```yaml
+services:
+  livekit:
+    image: natter            # docker build -t natter .
+    command: --config /etc/livekit.yml
+    environment:
+      NATTER_HTTP_ADDR: 0.0.0.0:7880
+      NATTER_WEBHOOK_TRACK_MUTES: "1"   # voice-ingress needs mutes (see Webhooks)
+    ports: !override
+      - "7881-7896:7881-7896"
+      - "50000-50100:50000-50100/udp"
+```
+
+natter runs one media engine per core, each on its own UDP and TCP port,
+where LiveKit uses one TCP port. Stoat opens UDP 50000–50100, enough for
+the UDP side, but only TCP 7881: publish (and allow through the firewall)
+7881 up to 7881 + cores − 1 as above, or set `NATTER_SHARDS` to fit.
+`natter-server --config livekit.yml ports` lists what it will use.
+
 ## Several nodes
 
 With `redis.address` in a LiveKit config, natter nodes form one server,

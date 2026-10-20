@@ -25,6 +25,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:trixie-slim
 COPY --from=build /natter-server /usr/local/bin/natter-server
 COPY --from=build /dist /app/dist
+# The volume starts as this directory, so the server's user must own it.
+RUN mkdir /data && chown 10001:10001 /data
 ENV NATTER_STATIC_DIR=/app/dist \
     NATTER_DATA_DIR=/data \
     NATTER_HTTP_ADDR=0.0.0.0:8080 \
