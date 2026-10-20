@@ -1,4 +1,5 @@
-# Server binary plus the built client, on a slim Debian base.
+# Server binary (with aws-lc for DTLS: faster handshakes when many join at
+# once) plus the built client, on a slim Debian base.
 #
 #   docker build -t natter .
 
@@ -13,7 +14,7 @@ COPY . .
 # results are copied out because the mounts vanish after each RUN.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p natter-server \
+    cargo build --release --locked -p natter-server --features aws-lc \
     && cp target/release/natter-server /natter-server
 # `--release` is what makes trunk run wasm-opt. It fetches wasm-bindgen and
 # wasm-opt itself, at the versions Cargo.lock needs.

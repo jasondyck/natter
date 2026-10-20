@@ -234,6 +234,17 @@ async fn main() -> Result<()> {
     if let Some(c) = &cluster {
         c.start(Arc::clone(&placement), Arc::clone(&metrics), agents.clone());
     }
+    // An engine per CPU, so the scheduler doesn't move them: an engine
+    // sleeps and wakes per packet when quiet, and each move lands it on a
+    // cold cache (about 15% of the CPU at 100 rooms). Not when there are
+    // more engines than CPUs this process may use.
+    let cpus = match util::allowed_cpus() {
+        cpus if config.pin_engines && cpus.len() >= shards => cpus,
+        _ => vec![],
+    };
+    if !cpus.is_empty() {
+        info!(cpus = ?&cpus[..shards], "engines pinned");
+    }
     let mut handles = vec![];
     for shard in 0..shards {
         let port = config
@@ -278,9 +289,13 @@ async fn main() -> Result<()> {
         };
         let webhooks = webhooks.clone();
         let (agents, back) = (agents.clone(), tx.clone());
+        let cpu = cpus.get(shard).copied();
         std::thread::Builder::new()
             .name(format!("rtc-{shard}"))
             .spawn(move || {
+                if let Some(cpu) = cpu {
+                    util::pin_to_cpu(cpu);
+                }
                 let run = AssertUnwindSafe(|| {
                     livekit::engine::run(
                         shard,

@@ -1,6 +1,6 @@
 #![allow(clippy::single_match)]
 
-use combine::EasyParser;
+use combine::{EasyParser, Parser};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::{self};
@@ -28,6 +28,13 @@ pub struct Sdp {
 
 impl Sdp {
     pub(crate) fn parse(input: &str) -> Result<Sdp, SdpError> {
+        // `easy_parse` builds (allocates, merges, dedups) an error for every
+        // alternative tried, which is most of the cost of parsing a valid
+        // SDP. Plain `&str` errors cost nothing; the detailed message is only
+        // needed when the input is invalid, so parse again for it then.
+        if let Ok((sdp, _)) = sdp_parser().parse(input) {
+            return Ok(sdp);
+        }
         sdp_parser()
             .easy_parse(input)
             .map(|(sdp, _)| sdp)

@@ -611,6 +611,8 @@ pub struct Settings {
     pub remote_unmute: bool,
     /// Participants an engine takes before new rooms go to the next.
     pub shard_fill: usize,
+    /// Each engine kept on a CPU of its own (when there are enough).
+    pub pin_engines: bool,
     pub dtls_crypto: livekit::rtc_config::DtlsCrypto,
     pub media: livekit::rtc_config::MediaConfig,
     /// API keys for LiveKit access tokens (`key: secret`).
@@ -1225,8 +1227,10 @@ impl Settings {
             remote_unmute: env_parse("NATTER_REMOTE_UNMUTE")?
                 .unwrap_or(lk.room.enable_remote_unmute.unwrap_or(false)),
             shard_fill: env_parse("NATTER_SHARD_FILL")?.unwrap_or(250),
+            pin_engines: env("NATTER_PIN_ENGINES").is_none_or(|v| v != "off"),
+            // A build with aws-lc was made to use it.
             dtls_crypto: env("NATTER_DTLS_CRYPTO")
-                .unwrap_or_else(|| "rust".into())
+                .unwrap_or_else(|| if cfg!(feature = "aws-lc") { "aws-lc" } else { "rust" }.into())
                 .parse()
                 .map_err(anyhow::Error::msg)
                 .context("NATTER_DTLS_CRYPTO")?,
