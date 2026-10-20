@@ -18,6 +18,8 @@ listed in `docs/livekit/PARITY.md` ("Deliberate differences").
 | `trailer.mjs` | Packet trailers (frame metadata) with and without the worker |
 | `e2ee.mjs` | End-to-end encryption with the right and a wrong key |
 | `joindata.mjs` | Reliable data to a participant while it joins |
+| `sstate.mjs` | `stream_state_update` around first subscribe, publisher mute/unmute and subscriber disable/enable |
+| `shutdown.mjs` | Stopping the server mid-call: what clients are told and the webhooks that follow (`CONFIG=shutdown.yaml`) |
 | `fastpub.mjs` | `fast_publish`: which PCs connect at join, first publish reaching a subscriber (always dual-PC; `TIMES=1` prints the timings) |
 | `agents/agents.py` | Agent dispatch with livekit-agents workers: automatic room and publisher jobs, explicit dispatch, token and CreateRoom dispatches, removal, errors (Python) |
 | `agents/raw.py` | The `/agent` worker protocol by hand: JSON/protobuf, declined offers, `terminate`, full workers, simulated jobs, refused registrations, deployments (Python) |
@@ -36,6 +38,10 @@ DUAL=1 ./run.sh natter perms.mjs natter-dual.txt   # dual-PC clients
 
 Both servers use `devkey: secret` on 127.0.0.1:7880 (UDP/TCP 7882). Only
 one can run at a time.
+
+`CONFIG=<file.yaml>` gives both servers a LiveKit config file as well
+(`shutdown.mjs` needs `CONFIG=shutdown.yaml` for its webhook receiver on
+:8797). Scripts see `SERVER=lk|natter`.
 
 ## Agent scenarios (Python)
 
