@@ -1108,6 +1108,8 @@ impl Settings {
                     .unwrap_or_else(|| lk.webhook.filter_params.include_events.clone()),
                 exclude: list("NATTER_WEBHOOK_EXCLUDE")
                     .unwrap_or_else(|| lk.webhook.filter_params.exclude_events.clone()),
+                track_mutes: env("NATTER_WEBHOOK_TRACK_MUTES")
+                    .is_some_and(|v| v == "true" || v == "1"),
             })
         };
 
