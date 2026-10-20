@@ -1,7 +1,8 @@
 #!/bin/bash
 # run.sh lk|natter <script.mjs|script.py> <out.txt>: starts LiveKit 1.13.10 (Docker,
-# --dev) or natter (target/release/natter-server, built beforehand: this
-# does not build) on :7880/:7882, runs the script, stops the server.
+# --dev; LK_IMAGE=<image> for another, e.g. Stoat's fork) or natter
+# (target/release/natter-server, built beforehand: this does not build) on
+# :7880/:7882, runs the script, stops the server.
 # DUAL=1 in the environment runs the clients in dual-PC mode. CONFIG=<file.yaml>
 # gives both servers a LiveKit config file (on top of the dev keys). The
 # script sees SERVER=lk|natter.
@@ -17,7 +18,7 @@ if [ -n "${CONFIG:-}" ]; then
 fi
 if [ "$1" = lk ]; then
   docker rm -f natter-e2e-lk >/dev/null 2>&1
-  docker run -d --name natter-e2e-lk --network host "${lk_config[@]}" livekit/livekit-server:v1.13.10 \
+  docker run -d --name natter-e2e-lk --network host "${lk_config[@]}" "${LK_IMAGE:-livekit/livekit-server:v1.13.10}" \
     --dev --bind 127.0.0.1 --node-ip 127.0.0.1 ${CONFIG:+--config /natter-e2e.yaml} >/dev/null
   sleep 3
 else
@@ -36,5 +37,7 @@ if [ "$1" = lk ]; then
   docker rm -f natter-e2e-lk >/dev/null
 else
   pkill -x natter-server
+  # It drains webhooks for up to 5 s; the next run needs the ports free.
+  while pgrep -x natter-server >/dev/null; do sleep 0.2; done
 fi
 rm -rf "$data"

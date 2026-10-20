@@ -2390,6 +2390,20 @@ impl Engine {
         p.version += 1;
         let room = p.room.clone();
         self.participant_update(&room, i);
+        let p = &self.participants[i];
+        if let Some(t) = p
+            .published
+            .iter()
+            .find(|t| t.info.sid == sid && t.backup_of.is_none())
+        {
+            let event = if req.muted {
+                webhook::TRACK_MUTED
+            } else {
+                webhook::TRACK_UNMUTED
+            };
+            let (who, info) = (p.who(), t.info.clone());
+            self.hook(event, &room, Some(who), Some(info));
+        }
     }
 
     /// Ends a publication: its subscribers lose it and the room hears.

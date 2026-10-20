@@ -12,6 +12,12 @@
 //! The body is protobuf JSON, its SHA-256 in the `sha256` claim of a
 //! 5-minute token signed with the webhook API key, in `Authorization`
 //! (no `Bearer`), so LiveKit's `webhook.Receive` verifies it.
+//!
+//! `track_muted` and `track_unmuted` are not LiveKit's: upstream only
+//! counts mutes in its analytics, and Stoat's fork of it sends them as
+//! webhooks too, which Stoat's `voice-ingress` relies on. They go out only
+//! when asked for (`Config::track_mutes`, or named in `include`), so
+//! natter's events otherwise stay LiveKit's.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -50,6 +56,9 @@ pub const PARTICIPANT_LEFT: &str = "participant_left";
 pub const PARTICIPANT_CONNECTION_ABORTED: &str = "participant_connection_aborted";
 pub const TRACK_PUBLISHED: &str = "track_published";
 pub const TRACK_UNPUBLISHED: &str = "track_unpublished";
+/// Stoat's fork only (see the module docs).
+pub const TRACK_MUTED: &str = "track_muted";
+pub const TRACK_UNMUTED: &str = "track_unmuted";
 
 pub struct Config {
     pub urls: Vec<String>,
@@ -58,10 +67,18 @@ pub struct Config {
     /// LiveKit's `filter_params`: only these events, or all but these.
     pub include: Vec<String>,
     pub exclude: Vec<String>,
+    /// Send `track_muted` and `track_unmuted`, as Stoat's LiveKit fork.
+    pub track_mutes: bool,
 }
 
 impl Config {
     fn allows(&self, event: &str) -> bool {
+        if (event == TRACK_MUTED || event == TRACK_UNMUTED)
+            && !self.track_mutes
+            && !self.include.iter().any(|e| e == event)
+        {
+            return false;
+        }
         if !self.include.is_empty() {
             return self.include.iter().any(|e| e == event);
         }
@@ -323,6 +340,7 @@ mod tests {
             api_secret: "secret-secret-secret-secret-secret".into(),
             include: vec![],
             exclude: vec![],
+            track_mutes: false,
         };
         let event = lk::WebhookEvent {
             event: ROOM_STARTED.into(),
@@ -350,9 +368,30 @@ mod tests {
             api_secret: String::new(),
             include: vec![],
             exclude: vec!["track_published".into()],
+            track_mutes: false,
         };
         assert!(c.allows(ROOM_STARTED) && !c.allows(TRACK_PUBLISHED));
         c.include = vec![ROOM_STARTED.into()];
         assert!(c.allows(ROOM_STARTED) && !c.allows(ROOM_FINISHED));
+    }
+
+    #[test]
+    fn mutes_only_when_asked() {
+        let mut c = Config {
+            urls: vec![],
+            api_key: String::new(),
+            api_secret: String::new(),
+            include: vec![],
+            exclude: vec![],
+            track_mutes: false,
+        };
+        assert!(!c.allows(TRACK_MUTED) && !c.allows(TRACK_UNMUTED));
+        c.include = vec![TRACK_MUTED.into()];
+        assert!(c.allows(TRACK_MUTED) && !c.allows(TRACK_UNMUTED));
+        c.include = vec![];
+        c.track_mutes = true;
+        assert!(c.allows(TRACK_MUTED) && c.allows(TRACK_UNMUTED));
+        c.exclude = vec![TRACK_UNMUTED.into()];
+        assert!(c.allows(TRACK_MUTED) && !c.allows(TRACK_UNMUTED));
     }
 }

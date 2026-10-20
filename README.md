@@ -124,6 +124,7 @@ The variables below are natter's own; they override the config file.
 | `NATTER_WEBHOOK_URLS` | none | Comma-separated URLs that get LiveKit's webhooks. `https` needs a build with `--features tls`. See [Webhooks](#webhooks) |
 | `NATTER_WEBHOOK_API_KEY` | the only key in `LIVEKIT_KEYS` | Which API key signs webhooks (LiveKit's `webhook.api_key`) |
 | `NATTER_WEBHOOK_INCLUDE`, `NATTER_WEBHOOK_EXCLUDE` | none | Comma-separated events to send only, or not to send (LiveKit's `filter_params`) |
+| `NATTER_WEBHOOK_TRACK_MUTES` | off | `1` also sends `track_muted` and `track_unmuted`, as Stoat's LiveKit fork does (upstream LiveKit doesn't). Naming either in the include list sends it too |
 | `NATTER_REMOTE_UNMUTE` | `false` | Let RoomService's MutePublishedTrack unmute tracks, not only mute them (LiveKit's `room.enable_remote_unmute`) |
 | `NATTER_ALLOW_PAUSE` | `false` | Let congestion control pause a subscriber's video entirely when even the lowest layer doesn't fit, with `stream_state_update` (LiveKit's `allow_pause`). A client can ask for it with `subscriber_allow_pause` |
 | `LIVEKIT_KEYS` | none | API keys for LiveKit access tokens, `key: secret` per line (or comma-separated), as LiveKit. Anyone with a key can mint tokens for any room, e.g. with `lk token create`. Unset, natter only accepts the tokens it mints for its own signed-in users |
@@ -376,6 +377,12 @@ is tried four more times backing off from 1 s, and events that waited
 over 30 s, or past 200 in a queue, are dropped (all LiveKit's defaults).
 Verified with `livekit-server-sdk`'s `WebhookReceiver`: the same events,
 in the same order, as LiveKit 1.13.10 sends for the same session.
+
+Optionally also `track_muted` and `track_unmuted` (the room, the
+participant's sid and identity, and the track as it is now), when a client
+or an admin mutes or unmutes a track. LiveKit doesn't send these; Stoat's
+fork of it does, and Stoat's voice service needs them. Off unless
+`NATTER_WEBHOOK_TRACK_MUTES=1` or the event is in the include list.
 
 ## Metrics
 
