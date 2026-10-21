@@ -1103,6 +1103,9 @@ pub struct Engine {
     /// Subscriber renegotiations held back by the debounce, by when due.
     negotiations: BinaryHeap<Reverse<(Instant, ConnId)>>,
     membership_changed: bool,
+    /// Someone was marked closing: reap on the next pass rather than at
+    /// the next housekeeping (up to 100 ms), so the room hears at once.
+    reap_soon: bool,
     /// Admins may unmute (LiveKit `room.enable_remote_unmute`).
     remote_unmute: bool,
     room_defaults: RoomDefaults,
@@ -1160,6 +1163,7 @@ pub fn run(
         timers: BinaryHeap::new(),
         negotiations: BinaryHeap::new(),
         membership_changed: false,
+        reap_soon: false,
         remote_unmute: opts.remote_unmute,
         room_defaults: opts.room_defaults,
         region: opts.region,
@@ -1195,10 +1199,15 @@ pub fn run(
         let now = Instant::now();
         if now >= next_housekeeping {
             next_housekeeping = now + Duration::from_millis(100);
+            engine.reap_soon = false;
             engine.reap(now);
             engine.seed_keyframes(now);
             engine.dynacast(now);
             engine.allocate_due(now);
+        }
+        if engine.reap_soon {
+            engine.reap_soon = false;
+            engine.reap(now);
         }
         if engine.membership_changed {
             engine.membership_changed = false;
@@ -1581,6 +1590,7 @@ impl Engine {
             if !p.closing {
                 info!(identity = %p.identity, "WHIP media path lost; closing");
                 p.closing = true;
+                self.reap_soon = true;
             }
             return;
         }
@@ -1792,6 +1802,7 @@ impl Engine {
                     leave_request::Action::Disconnect,
                 ));
                 other.closing = true;
+                self.reap_soon = true;
             }
         }
         let dependent = join.grant.agent
@@ -2099,6 +2110,7 @@ impl Engine {
                 leave_request::Action::Reconnect,
             ));
             p.closing = true;
+            self.reap_soon = true;
             return;
         }
         if !state.track_sids_disabled.is_empty() {

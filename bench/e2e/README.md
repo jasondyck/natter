@@ -20,6 +20,7 @@ listed in `docs/livekit/PARITY.md` ("Deliberate differences").
 | `joindata.mjs` | Reliable data to a participant while it joins |
 | `sstate.mjs` | `stream_state_update` around first subscribe, publisher mute/unmute and subscriber disable/enable |
 | `shutdown.mjs` | Stopping the server mid-call: what clients are told and the webhooks that follow (`CONFIG=shutdown.yaml`) |
+| `leave.mjs` | How soon the others hear a participant left (`ParticipantDisconnected`, track unsubscribed), in ms, five times |
 | `mutes.mjs` | `track_muted`/`track_unmuted` webhooks from the client and an admin, against Stoat's LiveKit fork (`CONFIG=shutdown.yaml`, `LK_IMAGE=ghcr.io/stoatchat/livekit-server:v1.9.14`; natter with `NATTER_WEBHOOK_TRACK_MUTES=1`) |
 | `fastpub.mjs` | `fast_publish`: which PCs connect at join, first publish reaching a subscriber (always dual-PC; `TIMES=1` prints the timings) |
 | `agents/agents.py` | Agent dispatch with livekit-agents workers: automatic room and publisher jobs, explicit dispatch, token and CreateRoom dispatches, removal, errors (Python) |

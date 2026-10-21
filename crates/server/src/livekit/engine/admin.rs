@@ -226,6 +226,7 @@ impl Engine {
         let p = &mut self.participants[i];
         p.send(leave(reason, leave_request::Action::Disconnect));
         p.closing = true;
+        self.reap_soon = true;
     }
 
     /// LiveKit's CreateRoom: the room as asked, or as it already is. The
