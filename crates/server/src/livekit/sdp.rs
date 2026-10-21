@@ -130,6 +130,22 @@ pub fn inactive_slots(sdp: &str, free: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Parse cost of a real offer: `SDP_FILE=offer.sdp cargo test --release
+    /// -p natter-server parse_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn parse_timing() {
+        let sdp = std::fs::read_to_string(std::env::var("SDP_FILE").unwrap()).unwrap();
+        let sdp = sdp.replace("\r\n", "\n").replace('\n', "\r\n");
+        let n = 2000;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(str0m::change::SdpOffer::from_sdp_string(&sdp).unwrap());
+        }
+        let us = t.elapsed().as_secs_f64() * 1e6 / n as f64;
+        println!("parse: {us:.1} µs per offer ({} bytes)", sdp.len());
+    }
+
     use super::*;
 
     #[test]

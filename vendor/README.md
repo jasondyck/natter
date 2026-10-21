@@ -169,6 +169,18 @@ retransmit by them (`streams/send_stats.rs`, `stats.rs`).
 Its expectations followed upstream's TWCC on audio; updated for the
 video-only patch above.
 
+### Patch: SDP parsed without `easy` errors first
+
+`Sdp::parse` used `combine`'s `easy_parse`, which allocates, merges and
+dedups an error for every alternative it tries: most of the cost of
+parsing a valid SDP, and a join parses at least one. It now parses with
+plain `&str` errors, which cost nothing, and only parses again with
+`easy_parse` for the message when the input is invalid. A 13 KB Chrome
+offer (audio, simulcast video, data channel, 72 candidates): 2.2 ms →
+0.34 ms; a small Firefox offer 152 → 25 µs. The parsed result is the same
+(compared by serialising both). `natter-server`'s ignored `parse_timing`
+test measures it.
+
 ## is 0.11.1
 
 str0m's ICE agent, vendored the same way (first commit as published).
