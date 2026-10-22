@@ -55,42 +55,60 @@ fn App() -> impl IntoView {
 
 #[component]
 fn SignIn(signed_in: Callback<Me>) -> impl IntoView {
-    let name = RwSignal::new(remembered_name());
-    let busy = RwSignal::new(false);
-    let error = RwSignal::new(None::<String>);
-
-    let submit = move |ev: leptos::ev::SubmitEvent| {
-        ev.prevent_default();
-        busy.set(true);
-        error.set(None);
-        spawn_local(async move {
-            match sign_in(name.get_untracked()).await {
-                Ok(m) => signed_in.run(m),
-                Err(e) => error.set(Some(e)),
-            }
-            busy.set(false);
-        });
-    };
-
     view! {
         <header><h1>"natter"</h1></header>
-        <ErrorLine error />
-        <form on:submit=submit>
-            <label>
-                "Name"
-                <input bind:value=name required autocomplete="username" />
-            </label>
-            <button type="submit" disabled=move || busy.get()>
-                {move || if busy.get() { "Waiting for passkey…" } else { "Sign in with passkey" }}
-            </button>
-        </form>
+        <PasskeyForm
+            label="Name"
+            button="Sign in with passkey"
+            name=RwSignal::new(remembered_name())
+            autofocus=false
+            signed_in
+            act=sign_in
+        />
         <p class="hint">"New here? Ask someone for an invite link."</p>
     }
 }
 
 #[component]
 fn SignUp(token: String, signed_in: Callback<Me>) -> impl IntoView {
-    let name = RwSignal::new(String::new());
+    let act = move |name: String| {
+        let req = RegisterStart {
+            invite: Some(token.clone()),
+            name: Some(name),
+        };
+        async move { register(&req).await }
+    };
+    view! {
+        <header><h1>"Join natter"</h1></header>
+        <PasskeyForm
+            label="Pick a name"
+            button="Create passkey"
+            name=RwSignal::new(String::new())
+            autofocus=true
+            signed_in
+            act
+        />
+        <p class="hint">
+            "Your device will save a passkey for this site. There's no password."
+        </p>
+    }
+}
+
+/// A name and a passkey button, as signing in and up both are: `act` runs
+/// the passkey ceremony for the name, and its account is signed in.
+#[component]
+fn PasskeyForm<F, Fut>(
+    label: &'static str,
+    button: &'static str,
+    name: RwSignal<String>,
+    autofocus: bool,
+    signed_in: Callback<Me>,
+    act: F,
+) -> impl IntoView
+where
+    F: Fn(String) -> Fut + 'static,
+    Fut: std::future::Future<Output = Result<Me, String>> + 'static,
+{
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
 
@@ -98,12 +116,9 @@ fn SignUp(token: String, signed_in: Callback<Me>) -> impl IntoView {
         ev.prevent_default();
         busy.set(true);
         error.set(None);
-        let req = RegisterStart {
-            invite: Some(token.clone()),
-            name: Some(name.get_untracked()),
-        };
+        let attempt = act(name.get_untracked());
         spawn_local(async move {
-            match register(&req).await {
+            match attempt.await {
                 Ok(m) => signed_in.run(m),
                 Err(e) => error.set(Some(e)),
             }
@@ -112,20 +127,16 @@ fn SignUp(token: String, signed_in: Callback<Me>) -> impl IntoView {
     };
 
     view! {
-        <header><h1>"Join natter"</h1></header>
         <ErrorLine error />
         <form on:submit=submit>
             <label>
-                "Pick a name"
-                <input bind:value=name required autocomplete="username" autofocus />
+                {label}
+                <input bind:value=name required autocomplete="username" autofocus=autofocus />
             </label>
             <button type="submit" disabled=move || busy.get()>
-                {move || if busy.get() { "Waiting for passkey…" } else { "Create passkey" }}
+                {move || if busy.get() { "Waiting for passkey…" } else { button }}
             </button>
         </form>
-        <p class="hint">
-            "Your device will save a passkey for this site. There's no password."
-        </p>
     }
 }
 
