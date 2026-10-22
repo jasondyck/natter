@@ -32,6 +32,7 @@ use crate::rtp_::{Bitrate, Extension, ExtensionMap};
 #[derive(Debug, Clone)]
 pub struct RtcConfig {
     pub(crate) local_ice_credentials: Option<IceCreds>,
+    pub(crate) ice_ufrag_prefix: Option<String>,
     pub(crate) crypto_provider: Option<Arc<CryptoProvider>>,
     pub(crate) dtls_cert: Option<DtlsCert>,
     pub(crate) fingerprint_verification: bool,
@@ -96,6 +97,15 @@ impl RtcConfig {
     /// Explicitly sets local ICE credentials.
     pub fn set_local_ice_credentials(mut self, local_ice_credentials: IceCreds) -> Self {
         self.local_ice_credentials = Some(local_ice_credentials);
+        self
+    }
+
+    /// Starts every local ICE ufrag this `Rtc` generates with `prefix`,
+    /// including those of ICE restarts (natter patch: lets one ICE/TCP
+    /// listener tell which `Rtc` a connection's first STUN request is for).
+    /// `prefix` must be ice-chars (letters, digits, `+`, `/`).
+    pub fn set_ice_ufrag_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.ice_ufrag_prefix = Some(prefix.into());
         self
     }
 
@@ -897,6 +907,7 @@ impl Default for RtcConfig {
     fn default() -> Self {
         Self {
             local_ice_credentials: None,
+            ice_ufrag_prefix: None,
             crypto_provider: None,
             dtls_cert: None,
             fingerprint_verification: true,

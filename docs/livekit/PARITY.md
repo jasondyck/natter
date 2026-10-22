@@ -358,11 +358,14 @@ track and LOW for the other, no loss.
       over a resume, 300 reliable messages over two resumes arrive once
       each and in order, an unknown publication forces a full reconnect
       after which video flows again
-- [x] ICE/TCP: a passive TCP candidate per engine (`NATTER_TCP_PORT`,
-      default the UDP port; LiveKit 7881), RFC 4571 framing on a thread
-      per engine. Verified in Chrome with UDP disabled: tcp/tcp both
-      ways, simulcast switching and congestion control with no loss, as
-      LiveKit over TCP
+- [x] ICE/TCP: a passive TCP candidate on one port for all engines
+      (`NATTER_TCP_PORT`, default the UDP port; LiveKit 7881), RFC 4571
+      framing on one thread; a connection goes to the engine its first
+      STUN request's ufrag names (each engine's ufrags start with its UDP
+      port, kept over ICE restarts by a str0m patch). Verified in Chrome
+      with UDP disabled: tcp/tcp both ways, simulcast switching and
+      congestion control with no loss, as LiveKit over TCP;
+      `bench/e2e/tcp.sh`, three engines behind one port
 - [x] Embedded TURN: UDP and TCP on `NATTER_TURN_PORT`, TLS natively
       (`--features tls`) or terminated in front; REST-API credentials in
       the join and reconnect responses' `ice_servers`; relays only to
@@ -555,8 +558,8 @@ track and LOW for the other, no loss.
   TURN) is configured. LiveKit then hands out Google's; natter's clients
   reach it directly, and would only tell Google their address.
 - Media ports: natter runs one engine per port, so a `udp_port` range
-  (or the default 50000-60000) becomes one port per core from its start,
-  and ICE/TCP takes as many ports from `tcp_port`. A single `udp_port` is
+  (or the default 50000-60000) becomes one port per core from its start;
+  ICE/TCP is one port, `tcp_port`, as LiveKit's. A single `udp_port` is
   one engine, as LiveKit's one port.
 - natter's embedded TURN also serves TCP on `turn.udp_port`, and
   advertises it.

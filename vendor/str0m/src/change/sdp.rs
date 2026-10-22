@@ -468,7 +468,7 @@ impl<'a> SdpApi<'a> {
         self.changes
             .retain(|c| !matches!(c, Change::IceRestart(_, _)));
 
-        let new_creds = IceCreds::new();
+        let new_creds = crate::new_ice_creds(self.rtc.ice_ufrag_prefix.as_deref());
         self.changes
             .push(Change::IceRestart(new_creds.clone(), keep_local_candidates));
 
@@ -744,7 +744,7 @@ fn add_ice_details(
         } else {
             // The remote OFFER had an ice restart, and we need to respond with
             // new credentials in the ANSWER.
-            (IceCreds::new(), true)
+            (crate::new_ice_creds(rtc.ice_ufrag_prefix.as_deref()), true)
         };
 
         rtc.ice

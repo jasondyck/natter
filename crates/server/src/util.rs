@@ -67,7 +67,11 @@ pub fn pin_to_cpu(cpu: usize) {
         let mut set: libc::cpu_set_t = std::mem::zeroed();
         libc::CPU_SET(cpu, &mut set);
         if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
-            tracing::warn!(cpu, "could not pin engine: {}", std::io::Error::last_os_error());
+            tracing::warn!(
+                cpu,
+                "could not pin engine: {}",
+                std::io::Error::last_os_error()
+            );
         }
     }
     #[cfg(not(target_os = "linux"))]

@@ -30,10 +30,12 @@ COPY --from=build /dist /app/dist
 RUN mkdir /data && chown 10001:10001 /data
 ENV NATTER_STATIC_DIR=/app/dist \
     NATTER_DATA_DIR=/data \
-    NATTER_HTTP_ADDR=0.0.0.0:8080 \
+    NATTER_HTTP_BIND=0.0.0.0 \
     NATTER_UDP_BIND=0.0.0.0
 # NATTER_ORIGIN and NATTER_PUBLIC_IP are deployment-specific; see README.
 USER 10001:10001
 VOLUME /data
+# Without a LiveKit config; with one, its ports (7880, 7881, 50000-…/udp by
+# default: `natter-server --config … ports`).
 EXPOSE 8080/tcp 50000/udp 50000/tcp
 ENTRYPOINT ["/usr/local/bin/natter-server"]

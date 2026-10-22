@@ -103,8 +103,9 @@ The variables below are natter's own; they override the config file.
 | Variable | Default | Meaning |
 |---|---|---|
 | `NATTER_HTTP_ADDR` | `127.0.0.1:8080` | HTTP + WebSocket listener. Loopback by default; put a TLS proxy in front, or set `0.0.0.0:8080` to listen everywhere |
+| `NATTER_HTTP_BIND` | none | The address HTTP listens on when `NATTER_HTTP_ADDR` and a LiveKit config's `bind_addresses` don't say, keeping the port (8080, or the config's `port`, 7880 by default). The Docker image sets `0.0.0.0` |
 | `NATTER_UDP_PORT` | `50000` | UDP port of the first media engine; the others follow it |
-| `NATTER_TCP_PORT` | `NATTER_UDP_PORT` | TCP port of the first media engine (ICE over TCP, for clients whose network blocks UDP; the others follow it, as for UDP), or `off`. LiveKit's `rtc.tcp_port` |
+| `NATTER_TCP_PORT` | `NATTER_UDP_PORT` | The one TCP port of every media engine (ICE over TCP, for clients whose network blocks UDP), or `off`. LiveKit's `rtc.tcp_port` |
 | `NATTER_TURN_PORT` | `off` | The embedded TURN server's port, UDP and TCP (LiveKit's `turn.udp_port`; 3478 is usual). See [TURN](#turn) |
 | `NATTER_TURN_TLS` | none | TURN over TLS, as advertised: `domain:port`, e.g. `natter.example.com:443` |
 | `NATTER_TURN_CERT`, `NATTER_TURN_KEY` | none | PEM certificate chain and key for natter to terminate TURN/TLS itself on `NATTER_TURN_TLS`'s port (needs a build with `--features tls`). Without them, terminate TLS in front of natter and forward it to `NATTER_TURN_PORT` over TCP |
@@ -132,8 +133,10 @@ The variables below are natter's own; they override the config file.
 | `RUST_LOG` | `natter_server=info,str0m=warn` | Log filter |
 
 The UDP port must be reachable from browsers (firewall rule). Clients
-whose network blocks UDP fall back to ICE over TCP on the same port
-numbers, or to [TURN](#turn) when it is on.
+whose network blocks UDP fall back to ICE over TCP on `NATTER_TCP_PORT`
+(the first UDP port's number by default; one port for all engines, which
+tell their connections apart by the ICE ufrag), or to [TURN](#turn) when
+it is on.
 
 ### TURN
 
@@ -179,19 +182,13 @@ LiveKit. A `compose.override.yml` beside Stoat's:
 services:
   livekit:
     image: natter            # docker build -t natter .
-    command: --config /etc/livekit.yml
     environment:
-      NATTER_HTTP_ADDR: 0.0.0.0:7880
       NATTER_WEBHOOK_TRACK_MUTES: "1"   # voice-ingress needs mutes (see Webhooks)
-    ports: !override
-      - "7881-7896:7881-7896"
-      - "50000-50100:50000-50100/udp"
 ```
 
-natter runs one media engine per core, each on its own UDP and TCP port,
-where LiveKit uses one TCP port. Stoat opens UDP 50000–50100, enough for
-the UDP side, but only TCP 7881: publish (and allow through the firewall)
-7881 up to 7881 + cores − 1 as above, or set `NATTER_SHARDS` to fit.
+Stoat's ports and command stay as they are. natter runs one media engine
+per core, each on its own UDP port from the config's range (Stoat opens
+UDP 50000–50100), and one ICE/TCP port for all of them, 7881 as LiveKit.
 `natter-server --config livekit.yml ports` lists what it will use.
 
 ## Several nodes

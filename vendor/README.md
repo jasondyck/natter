@@ -181,6 +181,17 @@ offer (audio, simulcast video, data channel, 72 candidates): 2.2 ms →
 (compared by serialising both). `natter-server`'s ignored `parse_timing`
 test measures it.
 
+### Patch: `RtcConfig::set_ice_ufrag_prefix`
+
+natter serves ICE/TCP for all its engines on one port, as LiveKit does, and
+gives a new connection to the engine its first STUN request's USERNAME
+names. Each engine's `Rtc`s start their local ufrags with its UDP port
+(four hex digits). Upstream can only set the first credentials
+(`set_local_ice_credentials`); an ICE restart, ours or the remote's, made
+fresh random ones. Now the prefix is kept on the `Rtc` and every local
+ufrag it generates starts with it (`lib.rs` `new_ice_creds`, the two
+restart paths in `change/sdp.rs`).
+
 ## is 0.11.1
 
 str0m's ICE agent, vendored the same way (first commit as published).
