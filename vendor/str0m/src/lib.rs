@@ -925,6 +925,9 @@ pub struct Rtc {
     fingerprint_verification: bool,
     close_dtls_started: bool,
     ice_ufrag_prefix: Option<String>,
+    /// natter: the soonest deadline other than sending's, from the last
+    /// timeout `poll_output` computed; None after input, until the next.
+    non_send_at: Option<Instant>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1302,6 +1305,7 @@ impl Rtc {
             fingerprint_verification: config.fingerprint_verification,
             close_dtls_started: false,
             ice_ufrag_prefix,
+            non_send_at: None,
         })
     }
 
@@ -1847,6 +1851,18 @@ impl Rtc {
                 .or_else(|| self.dtls.poll_packet())
                 .or_else(|| self.session.poll_datagram(self.last_now));
 
+            // natter: nothing to send, and only sending wants a timeout
+            // (the pacer after a send, or writes to timestamp): do that
+            // part here and look again, rather than return a timeout that
+            // the caller feeds straight back (`handle_send_timeout`).
+            let datagram = datagram.or_else(|| {
+                let now = self.last_now;
+                let fast = self.non_send_at.is_some_and(|at| now < at)
+                    && self.session.send_due(now)
+                    && self.session.handle_send_timeout(now);
+                fast.then(|| self.session.poll_datagram(now)).flatten()
+            });
+
             if let Some(contents) = datagram {
                 let t = net::Transmit {
                     proto: send.proto,
@@ -1863,13 +1879,26 @@ impl Rtc {
 
         let stats_timeout = self.stats.as_mut().and_then(|s| s.poll_timeout());
 
-        let time_and_reason = (None, Reason::NotHappening)
+        let ice_at = self.ice.poll_timeout();
+        let session_at = self.session.poll_timeout();
+        let others = (None, Reason::NotHappening)
             .soonest((self.next_dtls_timeout, Reason::DTLS))
-            .soonest((self.ice.poll_timeout(), Reason::Ice))
-            .soonest(self.session.poll_timeout())
+            .soonest((ice_at, Reason::Ice))
             .soonest((self.sctp.poll_timeout(), Reason::Sctp))
             .soonest((self.chan.poll_timeout(&self.sctp), Reason::Channel))
             .soonest((stats_timeout, Reason::Stats));
+        // ICE without a deadline is handled on every timeout (see
+        // do_handle_timeout), so it leaves no room for a send-only one.
+        self.non_send_at = match ice_at {
+            None => None,
+            Some(_) => Some(
+                others
+                    .soonest((self.session.non_send_at(), Reason::NotHappening))
+                    .0
+                    .unwrap_or_else(not_happening),
+            ),
+        };
+        let time_and_reason = others.soonest(session_at);
 
         // trace!("poll_output timeout reason: {}", time_and_reason.1);
 
@@ -1972,6 +2001,25 @@ impl Rtc {
         false
     }
 
+    /// natter: a timeout for an `Rtc` whose `poll_output` asked for one
+    /// only to send what was written (an SFU forwarding): timestamps the
+    /// writes and updates the pacer, skipping the rest of a timeout (ICE,
+    /// SCTP, every stream's reports, NACK, TWCC, the estimator), which has
+    /// nothing due. Anything else due, or input since the last timeout
+    /// `poll_output` gave, and this is `handle_input(Input::Timeout(now))`.
+    pub fn handle_send_timeout(&mut self, now: Instant) -> Result<(), RtcError> {
+        let fast = self.state == RtcState::Alive
+            && !self.need_init_time
+            && now >= self.last_now
+            && self.non_send_at.is_some_and(|at| now < at)
+            && self.session.handle_send_timeout(now);
+        if fast {
+            self.last_now = now;
+            return Ok(());
+        }
+        self.handle_input(Input::Timeout(now))
+    }
+
     /// Provide input to this `Rtc` instance. Input is either a [`Input::Timeout`] for some
     /// time that was previously obtained from [`Rtc::poll_output()`], or [`Input::Receive`]
     /// for network data.
@@ -2000,6 +2048,8 @@ impl Rtc {
         if self.state == RtcState::Closed {
             return Ok(());
         }
+        // Input can make anything due: the next timeout is a full one.
+        self.non_send_at = None;
 
         match input {
             Input::Timeout(now) => self.do_handle_timeout(now)?,

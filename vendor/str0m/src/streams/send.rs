@@ -1281,6 +1281,16 @@ impl StreamTx {
         self.send_queue.need_timeout()
     }
 
+    /// natter: see `Streams::stamp_send_queues`.
+    pub(crate) fn has_had_timeout(&self) -> bool {
+        self.kind.is_some()
+    }
+
+    /// natter: `handle_timeout` once it has had its first.
+    pub(crate) fn stamp_send_queue(&mut self, now: Instant) {
+        self.send_queue.handle_timeout(now);
+    }
+
     pub(crate) fn handle_timeout<'a>(
         &mut self,
         now: Instant,

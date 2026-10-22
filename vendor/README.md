@@ -205,6 +205,33 @@ whose open is being retried keeps it walking. 100 audio rooms: 13.3 →
 12.0 µs of CPU per forwarded packet (−10%); the data-channel e2e
 scenarios (data, RPC, streams, replay, data tracks, resume) unchanged.
 
+### Patch: send-only timeouts (`Rtc::handle_send_timeout`)
+
+A written packet only reaches the pacer through a timeout: the stream
+timestamps it and the pacer takes a fresh look at the queues there. And
+after every send the no-op pacer (audio) asks for a timeout at once to
+look again. So an SFU fed a full `handle_input(Input::Timeout)` about twice
+per forwarded packet, each running every subsystem's timers (ICE, SCTP,
+every stream's reports, NACK, TWCC, the estimator) with nothing due, plus
+a `poll_output` that recomputed every deadline to say so: 4.6 calls of
+`poll_output` per forwarded packet.
+
+- `Session::poll_timeout` also keeps the soonest deadline other than
+  sending's; `Rtc::poll_output` adds ICE, DTLS, SCTP, channels and stats
+  to it (`non_send_at`; any input clears it).
+- `Rtc::handle_send_timeout(now)`: when nothing but sending is due (and no
+  probe runs, no keyframe or REMB request waits, no estimator re-check is
+  due, no stream has yet to have its first timeout), it only timestamps
+  writes and updates the pacer (`Session::handle_send_timeout`); else it
+  is `handle_input(Input::Timeout(now))`.
+- `poll_output` with nothing to send, when only sending is due, does the
+  same itself and looks again instead of returning a timeout.
+
+natter calls `handle_send_timeout(now)` before polling a transport it wrote
+to. Audio, 100 rooms: 2.7 `poll_output` calls per forwarded packet and full
+timeouts from ~2 per forward to almost none; 11.7 → 10.6 µs of CPU per
+forward. Video: 33.9 → 31.5 µs, latency p99 3.8 → 1.5 ms.
+
 ## is 0.11.1
 
 str0m's ICE agent, vendored the same way (first commit as published).
