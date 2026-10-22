@@ -7,6 +7,7 @@
 //! Candidates trickle from the server per connection. Publishers join with
 //! `auto_subscribe=0`, as `lk load-test`'s publishers do.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -108,7 +109,11 @@ pub async fn join(ctx: Arc<Ctx>, keys: Keys, client: Client) -> anyhow::Result<(
         subscriber: None,
         candidates: Vec::new(),
         events: unbounded_channel().0,
+        capped: HashSet::new(),
     };
+    if let Some(cap) = session.cap_video(&join.other_participants) {
+        send(&mut ws, cap).await?;
+    }
     if session.client.publisher.is_some() {
         session.cid = format!("TR_load{}", session.client.identity);
         let add = match session.ctx.kind {
@@ -162,6 +167,8 @@ struct Session {
     candidates: Vec<(lk::SignalTarget, Candidate)>,
     /// Nobody listens: LiveKit signals everything over the WebSocket.
     events: UnboundedSender<ConnEvent>,
+    /// Video tracks already asked to stay within `Ctx::sub_quality`.
+    capped: HashSet<String>,
 }
 
 impl Session {
@@ -237,9 +244,39 @@ impl Session {
                 }
                 None
             }
+            M::Update(update) => self.cap_video(&update.participants),
             M::Leave(leave) => bail!("server asked to leave: {leave:?}"),
             _ => None,
         })
+    }
+
+    /// With `--sub-quality`: asks for the size of that layer on video
+    /// tracks not asked about yet.
+    fn cap_video(
+        &mut self,
+        participants: &[lk::ParticipantInfo],
+    ) -> Option<signal_request::Message> {
+        let quality = self.ctx.sub_quality?;
+        let track_sids: Vec<String> = participants
+            .iter()
+            .flat_map(|p| &p.tracks)
+            .filter(|t| {
+                t.r#type == lk::TrackType::Video as i32 && self.capped.insert(t.sid.clone())
+            })
+            .map(|t| t.sid.clone())
+            .collect();
+        if track_sids.is_empty() {
+            return None;
+        }
+        let (width, height) = LAYER_SIZES[usize::from(quality)];
+        Some(signal_request::Message::TrackSetting(
+            lk::UpdateTrackSettings {
+                track_sids,
+                width,
+                height,
+                ..Default::default()
+            },
+        ))
     }
 
     fn offer_publisher(&mut self, track: &str) -> anyhow::Result<signal_request::Message> {
@@ -312,8 +349,11 @@ impl Session {
 
 /// The layers a video publisher announces: 1280×720 alone, or with
 /// simulcast 320×180, 640×360 and 1280×720 at their shares of the bitrate.
+/// Simulcast layer sizes, q to f.
+const LAYER_SIZES: [(u32, u32); 3] = [(320, 180), (640, 360), (1280, 720)];
+
 fn video_layers(ctx: &Ctx) -> Vec<lk::VideoLayer> {
-    let sizes = [(320, 180), (640, 360), (1280, 720)];
+    let sizes = LAYER_SIZES;
     let qualities = [
         lk::VideoQuality::Low,
         lk::VideoQuality::Medium,

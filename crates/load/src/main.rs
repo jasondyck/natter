@@ -91,6 +91,10 @@ struct Args {
     /// all of --video-kbps).
     #[arg(long, requires = "video")]
     simulcast: bool,
+    /// Subscribers ask for no more than this layer of each video track:
+    /// q (320×180), h (640×360) or f.
+    #[arg(long, value_parser = parse_quality, requires = "simulcast")]
+    sub_quality: Option<u8>,
     /// Every client's downlink is a bottleneck of this many kbit/s, with a
     /// queue (--down-queue-ms) that drops packets when full.
     #[arg(long)]
@@ -154,6 +158,15 @@ fn parse_ms(s: &str) -> Result<Duration, String> {
     match s.parse::<f64>() {
         Ok(ms) => Ok(Duration::from_secs_f64(ms / 1000.0)),
         Err(_) => parse_duration(s),
+    }
+}
+
+fn parse_quality(s: &str) -> Result<u8, String> {
+    match s {
+        "q" => Ok(0),
+        "h" => Ok(1),
+        "f" => Ok(2),
+        _ => Err(format!("expected q, h or f, not {s:?}")),
     }
 }
 
@@ -250,6 +263,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         kind,
         args.simulcast,
         args.video_kbps * 1000,
+        args.sub_quality,
         workers.clone(),
     );
 

@@ -215,6 +215,22 @@ queue built for ~600 ms before the detector saw it; and from upgrades
 taken on the 10 s peak while the current estimate had already fallen
 below what was sent. Both are closed in step 3 below.
 
+What is left of the gap is the video natter sends: on that link it keeps
+one track on `h` much of the time, LiveKit stays on `q`. With subscribers
+asking for `q` only (`natter-load --sub-quality q`), so both servers send
+the same, natter is ahead. Five interleaved runs of each, the same session:
+
+| 1 Mbit/s, 150 ms | p50 | p99 | frames on `h` |
+|---|---|---|---|
+| natter, subscribers ask for `q` | 172–173 ms | 186–187 ms | 0 |
+| LiveKit | 173–175 ms | 191–218 ms (median 199) | 0–8% |
+| natter | 178–184 ms | 203–266 ms (median 207) | 27–50% |
+
+An `h` frame is about three times a `q` frame, ~17 ms through the link
+against ~5, and keyframes four times that; LiveKit's p99 rises the same
+way in the runs where it tries `h`. Raw results in
+[`data/2026-10-22/congestion/same-video`](data/2026-10-22/congestion/same-video).
+
 **How it works** (`crates/server/src/livekit/allocator.rs`):
 
 1. The estimate is str0m's GCC on the client's TWCC feedback. Layers are
