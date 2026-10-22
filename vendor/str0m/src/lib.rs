@@ -1857,9 +1857,8 @@ impl Rtc {
             // the caller feeds straight back (`handle_send_timeout`).
             let datagram = datagram.or_else(|| {
                 let now = self.last_now;
-                let fast = self.non_send_at.is_some_and(|at| now < at)
-                    && self.session.send_due(now)
-                    && self.session.handle_send_timeout(now);
+                let fast = self.session.send_due(now)
+                    && send_timeout_only(self.non_send_at, &mut self.session, now);
                 fast.then(|| self.session.poll_datagram(now)).flatten()
             });
 
@@ -2011,8 +2010,7 @@ impl Rtc {
         let fast = self.state == RtcState::Alive
             && !self.need_init_time
             && now >= self.last_now
-            && self.non_send_at.is_some_and(|at| now < at)
-            && self.session.handle_send_timeout(now);
+            && send_timeout_only(self.non_send_at, &mut self.session, now);
         if fast {
             self.last_now = now;
             return Ok(());
@@ -2261,6 +2259,13 @@ impl PartialEq for Event {
 }
 
 impl Eq for Event {}
+
+/// natter: the sending part of a timeout alone, if nothing else is due at
+/// `now` (`Rtc::non_send_at`, `Session::handle_send_timeout`). False:
+/// nothing done.
+fn send_timeout_only(non_send_at: Option<Instant>, session: &mut Session, now: Instant) -> bool {
+    non_send_at.is_some_and(|at| now < at) && session.handle_send_timeout(now)
+}
 
 /// Random local ICE credentials, the ufrag after `prefix` if given.
 pub(crate) fn new_ice_creds(prefix: Option<&str>) -> IceCreds {
