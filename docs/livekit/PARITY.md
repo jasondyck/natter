@@ -97,7 +97,6 @@ Timing each stage found:
      (audio publications with more than one codec, which natter doesn't
      take yet). Of LiveKit's SDKs only the Go one (`server-sdk-go`) acts on
      it, publishing the backup codec asked for; the JS SDK ignores it.
-   - A Chrome test under a real bottleneck.
    - UDP-unstable fallback.
    - WHEP.
    - Multi-node: Redis TLS/Sentinel/Cluster, draining that waits for
@@ -331,8 +330,11 @@ track and LOW for the other, no loss.
       made it worse (p99 ~330 ms): the queue it left didn't drain
 - [ ] Unmanaged (single-layer) screen shares exempt, as LiveKit; temporal
       layers; per-track priority (unused by LiveKit 1.13.10 too)
-- [ ] Not browser-tested under a real bottleneck (Chrome's network
-      throttling doesn't touch WebRTC; would need tc/netem)
+- [x] Browser-tested under a bottleneck: `bench/e2e/thin` (Chrome on both
+      ends through a shaping router in network namespaces, no root). At
+      1 Mbit/s and 150 ms natter keeps audio clean and video unfrozen at
+      a lower layer; LiveKit holds 720p at 6–8 fps and its audio queues
+      and drops behind it (docs/benchmarks, "With audio on the same link")
 
 ### 6. SVC and codec fallback
 

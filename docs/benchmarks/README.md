@@ -243,14 +243,33 @@ audio too; five interleaved runs each:
 
 natter's upgrades to `h` cost its audio ~10 ms at p99. LiveKit overloaded
 the link in four runs of five (14,000–175,000 packets dropped by the
-bottleneck's queue, against ~4,000 without the audio participant):
-counting what reached the bottleneck in one such run, it sent more video
-resends (RTX, ~1100 bytes) than original video packets, on the `h` and `f`
+bottleneck's queue, against ~4,000 without the audio participant): it
+sent more video resends than original video packets, on the `h` and `f`
 layers rather than `q`, and the audio queued and was dropped behind them.
-Why the audio participant sets this off isn't pinned down, nor whether
-`natter-load`'s receiver (str0m's NACKs, not Chrome's) plays a part.
-Raw results in
-[`data/2026-10-22/congestion/with-audio`](data/2026-10-22/congestion/with-audio).
+
+**The same in Chrome.** To rule out `natter-load`'s receiver (str0m's
+NACKs, not a browser's), `bench/e2e/thin` runs the call with Chrome on
+both ends (2 cameras publishing 720p simulcast, a microphone, 3
+subscribers) through a shaping router with the same link. What Chrome's
+receivers reported, over 20 s:
+
+| 1 Mbit/s, 150 ms, Chrome | audio lost | audio jitter buffer | video freezes | video received |
+|---|---|---|---|---|
+| natter (5 runs) | 0 | 65–74 ms | 0 | 180p and 360p, 20 fps (all the camera sends) |
+| LiveKit (5 runs) | 0 once, else 0.5–2.8% | 179–228 ms | 0 once, else 5–11 (3.8–12 s) | 720p at 6–8 fps |
+| natter, no microphone (2) | | | 0, and 2 (0.6 s) | 180p and 360p, 20 fps |
+| LiveKit, no microphone (2) | | | 0 | 720p at 7.5 fps |
+
+LiveKit keeps the 720p layer and drops frame rate (forwarding fewer
+temporal layers) to fit its estimate, which then leaves no room for the
+audio: with the microphone, audio waits up to 200 ms in the full queue
+(p99 of its queueing at the bottleneck, against natter's 25–45 ms) and is
+dropped, and video freezes. natter budgets audio at its measured rate
+before allocating video, picks a smaller spatial layer and keeps every
+frame. Raw results in
+[`data/2026-10-22/congestion/with-audio`](data/2026-10-22/congestion/with-audio)
+(`natter-load`) and [`data/2026-10-22/congestion/chrome`](data/2026-10-22/congestion/chrome)
+(Chrome).
 
 **How it works** (`crates/server/src/livekit/allocator.rs`):
 
