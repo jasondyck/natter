@@ -103,8 +103,9 @@ The variables below are natter's own; they override the config file.
 | Variable | Default | Meaning |
 |---|---|---|
 | `NATTER_HTTP_ADDR` | `127.0.0.1:8080` | HTTP + WebSocket listener. Loopback by default; put a TLS proxy in front, or set `0.0.0.0:8080` to listen everywhere |
+| `NATTER_HTTP_BIND` | none | The address HTTP listens on when `NATTER_HTTP_ADDR` and a LiveKit config's `bind_addresses` don't say, keeping the port (8080, or the config's `port`, 7880 by default). The Docker image sets `0.0.0.0` |
 | `NATTER_UDP_PORT` | `50000` | UDP port of the first media engine; the others follow it |
-| `NATTER_TCP_PORT` | `NATTER_UDP_PORT` | TCP port of the first media engine (ICE over TCP, for clients whose network blocks UDP; the others follow it, as for UDP), or `off`. LiveKit's `rtc.tcp_port` |
+| `NATTER_TCP_PORT` | `NATTER_UDP_PORT` | The one TCP port of every media engine (ICE over TCP, for clients whose network blocks UDP), or `off`. LiveKit's `rtc.tcp_port` |
 | `NATTER_TURN_PORT` | `off` | The embedded TURN server's port, UDP and TCP (LiveKit's `turn.udp_port`; 3478 is usual). See [TURN](#turn) |
 | `NATTER_TURN_TLS` | none | TURN over TLS, as advertised: `domain:port`, e.g. `natter.example.com:443` |
 | `NATTER_TURN_CERT`, `NATTER_TURN_KEY` | none | PEM certificate chain and key for natter to terminate TURN/TLS itself on `NATTER_TURN_TLS`'s port (needs a build with `--features tls`). Without them, terminate TLS in front of natter and forward it to `NATTER_TURN_PORT` over TCP |
@@ -114,8 +115,9 @@ The variables below are natter's own; they override the config file.
 | `NATTER_DATA_DIR` | `data` | Holds `natter.redb` (accounts, sessions, invites) |
 | `NATTER_STATIC_DIR` | `crates/client/dist` | Built client |
 | `NATTER_SHARDS` | number of cores | Media engines (threads). Engine *n* uses UDP `NATTER_UDP_PORT` + *n*, so open that whole range. Rooms are never split between engines |
-| `NATTER_SHARD_FILL` | `250` | Participants an engine takes before new rooms go to the next; a busy engine is cheaper per packet than several idle ones. Rooms count as at least 8 people until they grow |
-| `NATTER_DTLS_CRYPTO` | `rust` | DTLS handshake crypto: `rust` (RustCrypto, P-256 on p256 0.14) or `aws-lc` (C and assembly; needs a build with `--features aws-lc`). `aws-lc` makes handshakes about three times cheaper, which only matters when hundreds of clients join one engine within a second: setup p99 at 30 rooms joining at once 0.38–0.41 s → 0.31–0.35 s |
+| `NATTER_SHARD_FILL` | `120` | Participants an engine takes before new rooms go to the next; a busy engine is cheaper per packet than several idle ones, but a burst of joins queues on it. Rooms count as at least 8 people until they grow |
+| `NATTER_PIN_ENGINES` | on | Keeps each engine on a CPU of its own (of those the process may use: a container's cpuset counts), so the scheduler doesn't move it between cores: about 15% less CPU at 100 audio rooms. `off` to leave it to the scheduler; also off when there are more engines than CPUs |
+| `NATTER_DTLS_CRYPTO` | `aws-lc` in a build with `--features aws-lc` (as the `Dockerfile`'s), else `rust` | DTLS handshake crypto: `rust` (RustCrypto, P-256 on p256 0.14) or `aws-lc` (C and assembly; needs a build with `--features aws-lc`). `aws-lc` makes handshakes about three times cheaper, which only matters when hundreds of clients join one engine within a second: setup p99 at 30 rooms joining at once 0.38–0.41 s → 0.31–0.35 s |
 | `NATTER_MAX_PEERS` | `200` | Joins beyond this are refused, so an overloaded server turns new calls away instead of degrading every call. See [Load testing](#load-testing) for what one core sustains |
 | `NATTER_AUDIO_NACK` | `true` | Resend lost audio on request (RTCP NACK) to and from peers that negotiate it. Browsers don't; native clients and `lk` do. See [Loss recovery](#loss-recovery) |
 | `NATTER_AUDIO_RED` | `true` | Redundant audio (RFC 2198): each packet also carries the previous frame |
@@ -131,8 +133,10 @@ The variables below are natter's own; they override the config file.
 | `RUST_LOG` | `natter_server=info,str0m=warn` | Log filter |
 
 The UDP port must be reachable from browsers (firewall rule). Clients
-whose network blocks UDP fall back to ICE over TCP on the same port
-numbers, or to [TURN](#turn) when it is on.
+whose network blocks UDP fall back to ICE over TCP on `NATTER_TCP_PORT`
+(the first UDP port's number by default; one port for all engines, which
+tell their connections apart by the ICE ufrag), or to [TURN](#turn) when
+it is on.
 
 ### TURN
 
@@ -164,6 +168,28 @@ that terminates TLS for `NATTER_ORIGIN`, `NATTER_STATIC_DIR` pointing at
 `crates/client/dist`, and `NATTER_PUBLIC_IP` set to the address clients send
 media to (UDP `NATTER_UDP_PORT` must be reachable there). The process keeps
 its database in `NATTER_DATA_DIR`, and only one process can open it.
+
+## With Stoat
+
+[Stoat](https://github.com/stoatchat/self-hosted) runs voice on its own
+LiveKit container (`livekit` in its `compose.yml`), and natter can take its
+place with the same `livekit.yml`. Tested against Stoat 0.15.5's
+self-hosted stack: its API's `join_call`, its web client in a voice channel,
+and its `voice-ingress` events (join, leave, mute, unmute) all as with its
+LiveKit. A `compose.override.yml` beside Stoat's:
+
+```yaml
+services:
+  livekit:
+    image: natter            # docker build -t natter .
+    environment:
+      NATTER_WEBHOOK_TRACK_MUTES: "1"   # voice-ingress needs mutes (see Webhooks)
+```
+
+Stoat's ports and command stay as they are. natter runs one media engine
+per core, each on its own UDP port from the config's range (Stoat opens
+UDP 50000–50100), and one ICE/TCP port for all of them, 7881 as LiveKit.
+`natter-server --config livekit.yml ports` lists what it will use.
 
 ## Several nodes
 

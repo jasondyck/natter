@@ -596,7 +596,7 @@ pub struct Settings {
     pub udp_port: u16,
     /// Media engines (threads), each on its own UDP port from `udp_port`.
     pub shards: usize,
-    /// ICE/TCP: the first engine's TCP port (the others follow), or None.
+    /// ICE/TCP: the one TCP port every engine shares, or None.
     pub tcp_port: Option<u16>,
     /// The embedded TURN server's UDP and TCP port, if on.
     pub turn_port: Option<u16>,
@@ -611,6 +611,8 @@ pub struct Settings {
     pub remote_unmute: bool,
     /// Participants an engine takes before new rooms go to the next.
     pub shard_fill: usize,
+    /// Each engine kept on a CPU of its own (when there are enough).
+    pub pin_engines: bool,
     pub dtls_crypto: livekit::rtc_config::DtlsCrypto,
     pub media: livekit::rtc_config::MediaConfig,
     /// API keys for LiveKit access tokens (`key: secret`).
@@ -833,13 +835,18 @@ impl Settings {
             keys = parse_keys(&env("LIVEKIT_KEYS").unwrap_or_default()).context("LIVEKIT_KEYS")?;
         }
         let mut binds = lk.bind_addresses.clone();
+        // Where HTTP listens when nothing more specific says: the image sets
+        // 0.0.0.0, keeping the port the config (or the default) gives.
+        let http_bind: Option<IpAddr> = env_parse("NATTER_HTTP_BIND")?;
         if dev && keys.is_empty() {
             notes.push(
                 "no keys provided, using placeholder keys: API Key devkey, API Secret secret"
                     .into(),
             );
             keys.insert("devkey".into(), "secret".into());
-            binds.get_or_insert_with(|| vec!["127.0.0.1".into(), "::1".into()]);
+            if http_bind.is_none() {
+                binds.get_or_insert_with(|| vec!["127.0.0.1".into(), "::1".into()]);
+            }
         }
         let keys_text: String = keys.iter().map(|(k, s)| format!("{k}: {s}\n")).collect();
         let keys = livekit::token::Keys::parse(&keys_text).map_err(anyhow::Error::msg)?;
@@ -858,10 +865,16 @@ impl Settings {
                                 .with_context(|| format!("bind address {ip:?}"))
                         })
                         .collect::<Result<_>>()?,
-                    None => vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)],
+                    None => vec![SocketAddr::new(
+                        http_bind.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+                        port,
+                    )],
                 }
             }
-            None => vec!["127.0.0.1:8080".parse().expect("valid")],
+            None => vec![SocketAddr::new(
+                http_bind.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                8080,
+            )],
         };
 
         // Media ports: one engine per port of the range.
@@ -1224,9 +1237,18 @@ impl Settings {
             max_peers: env_parse("NATTER_MAX_PEERS")?.unwrap_or(200),
             remote_unmute: env_parse("NATTER_REMOTE_UNMUTE")?
                 .unwrap_or(lk.room.enable_remote_unmute.unwrap_or(false)),
-            shard_fill: env_parse("NATTER_SHARD_FILL")?.unwrap_or(250),
+            shard_fill: env_parse("NATTER_SHARD_FILL")?.unwrap_or(120),
+            pin_engines: env("NATTER_PIN_ENGINES").is_none_or(|v| v != "off"),
+            // A build with aws-lc was made to use it.
             dtls_crypto: env("NATTER_DTLS_CRYPTO")
-                .unwrap_or_else(|| "rust".into())
+                .unwrap_or_else(|| {
+                    if cfg!(feature = "aws-lc") {
+                        "aws-lc"
+                    } else {
+                        "rust"
+                    }
+                    .into()
+                })
                 .parse()
                 .map_err(anyhow::Error::msg)
                 .context("NATTER_DTLS_CRYPTO")?,
@@ -1260,10 +1282,7 @@ impl Settings {
         tcp.dedup();
         let last = |base: u16| base + self.shards as u16 - 1;
         if let Some(p) = self.tcp_port {
-            tcp.push(match self.shards {
-                1 => format!("{p} - ICE/TCP"),
-                _ => format!("{p}-{} - ICE/TCP", last(p)),
-            });
+            tcp.push(format!("{p} - ICE/TCP"));
         }
         udp.push(match self.shards {
             1 => format!("{} - ICE/UDP", self.udp_port),

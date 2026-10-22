@@ -924,6 +924,7 @@ pub struct Rtc {
     crypto_provider: Arc<crate::crypto::CryptoProvider>,
     fingerprint_verification: bool,
     close_dtls_started: bool,
+    ice_ufrag_prefix: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1231,7 +1232,10 @@ impl Rtc {
         // Capture before any partial moves of `config` below.
         let mtu = config.mtu.clone();
 
-        let local_creds = config.local_ice_credentials.unwrap_or_else(IceCreds::new);
+        let ice_ufrag_prefix = config.ice_ufrag_prefix.clone();
+        let local_creds = config
+            .local_ice_credentials
+            .unwrap_or_else(|| new_ice_creds(ice_ufrag_prefix.as_deref()));
         let mut ice = IceAgent::with_hmac(local_creds, crypto_provider.sha1_hmac_provider);
         if config.ice_lite {
             ice.set_ice_lite(config.ice_lite);
@@ -1297,6 +1301,7 @@ impl Rtc {
             crypto_provider,
             fingerprint_verification: config.fingerprint_verification,
             close_dtls_started: false,
+            ice_ufrag_prefix,
         })
     }
 
@@ -2206,6 +2211,15 @@ impl PartialEq for Event {
 }
 
 impl Eq for Event {}
+
+/// Random local ICE credentials, the ufrag after `prefix` if given.
+pub(crate) fn new_ice_creds(prefix: Option<&str>) -> IceCreds {
+    let mut creds = IceCreds::new();
+    if let Some(prefix) = prefix {
+        creds.ufrag.insert_str(0, prefix);
+    }
+    creds
+}
 
 impl fmt::Debug for Rtc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

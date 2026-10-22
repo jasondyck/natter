@@ -42,3 +42,38 @@ pub fn content_type(headers: &HeaderMap) -> &str {
         .unwrap_or("")
         .trim()
 }
+
+/// The CPUs this process may run on (its affinity mask: a container's
+/// cpuset, `taskset`), in order. Empty where that isn't known.
+pub fn allowed_cpus() -> Vec<usize> {
+    #[cfg(target_os = "linux")]
+    // SAFETY: `set` is a plain bitmask the call fills in.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        if libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) == 0 {
+            return (0..libc::CPU_SETSIZE as usize)
+                .filter(|&c| libc::CPU_ISSET(c, &set))
+                .collect();
+        }
+    }
+    vec![]
+}
+
+/// Keeps the calling thread on one CPU.
+pub fn pin_to_cpu(cpu: usize) {
+    #[cfg(target_os = "linux")]
+    // SAFETY: as above; the call only reads `set`.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_SET(cpu, &mut set);
+        if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
+            tracing::warn!(
+                cpu,
+                "could not pin engine: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = cpu;
+}

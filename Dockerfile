@@ -1,4 +1,5 @@
-# Server binary plus the built client, on a slim Debian base.
+# Server binary (with aws-lc for DTLS: faster handshakes when many join at
+# once) plus the built client, on a slim Debian base.
 #
 #   docker build -t natter .
 
@@ -13,7 +14,7 @@ COPY . .
 # results are copied out because the mounts vanish after each RUN.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p natter-server \
+    cargo build --release --locked -p natter-server --features aws-lc \
     && cp target/release/natter-server /natter-server
 # `--release` is what makes trunk run wasm-opt. It fetches wasm-bindgen and
 # wasm-opt itself, at the versions Cargo.lock needs.
@@ -25,12 +26,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:trixie-slim
 COPY --from=build /natter-server /usr/local/bin/natter-server
 COPY --from=build /dist /app/dist
+# The volume starts as this directory, so the server's user must own it.
+RUN mkdir /data && chown 10001:10001 /data
 ENV NATTER_STATIC_DIR=/app/dist \
     NATTER_DATA_DIR=/data \
-    NATTER_HTTP_ADDR=0.0.0.0:8080 \
+    NATTER_HTTP_BIND=0.0.0.0 \
     NATTER_UDP_BIND=0.0.0.0
 # NATTER_ORIGIN and NATTER_PUBLIC_IP are deployment-specific; see README.
 USER 10001:10001
 VOLUME /data
+# Without a LiveKit config; with one, its ports (7880, 7881, 50000-…/udp by
+# default: `natter-server --config … ports`).
 EXPOSE 8080/tcp 50000/udp 50000/tcp
 ENTRYPOINT ["/usr/local/bin/natter-server"]

@@ -234,7 +234,18 @@ async fn main() -> Result<()> {
     if let Some(c) = &cluster {
         c.start(Arc::clone(&placement), Arc::clone(&metrics), agents.clone());
     }
-    let mut handles = vec![];
+    // An engine per CPU, so the scheduler doesn't move them: an engine
+    // sleeps and wakes per packet when quiet, and each move lands it on a
+    // cold cache (about 15% of the CPU at 100 rooms). Not when there are
+    // more engines than CPUs this process may use.
+    let cpus = match util::allowed_cpus() {
+        cpus if config.pin_engines && cpus.len() >= shards => cpus,
+        _ => vec![],
+    };
+    if !cpus.is_empty() {
+        info!(cpus = ?&cpus[..shards], "engines pinned");
+    }
+    let mut sockets = vec![];
     for shard in 0..shards {
         let port = config
             .udp_port
@@ -246,25 +257,29 @@ async fn main() -> Result<()> {
                 config.udp_bind
             )
         })?;
-        let advertised = SocketAddr::new(config.public_ip, socket.local_addr()?.port());
         size_socket_buffers(&socket);
-        // ICE/TCP for clients whose network blocks UDP.
-        let tcp = match config.tcp_port {
-            Some(base) => {
-                let port = base
-                    .checked_add(shard as u16)
-                    .context("NATTER_TCP_PORT + NATTER_SHARDS overflows")?;
-                let listener = std::net::TcpListener::bind((config.udp_bind, port))
-                    .with_context(|| format!("binding TCP {}:{port}", config.udp_bind))?;
-                Some(livekit::tcp::start(
-                    shard,
-                    listener,
-                    advertised,
-                    socket.local_addr()?,
-                )?)
-            }
-            None => None,
-        };
+        sockets.push(socket);
+    }
+    // ICE/TCP for clients whose network blocks UDP: one port for all.
+    let mut tcp_links = match config.tcp_port {
+        Some(port) => {
+            let listener = std::net::TcpListener::bind((config.udp_bind, port))
+                .with_context(|| format!("binding TCP {}:{port}", config.udp_bind))?;
+            let engines = sockets
+                .iter()
+                .map(UdpSocket::local_addr)
+                .collect::<std::io::Result<Vec<_>>>()?;
+            livekit::tcp::start(listener, config.public_ip, &engines)?
+                .into_iter()
+                .map(Some)
+                .collect()
+        }
+        None => vec![],
+    };
+    tcp_links.resize_with(shards, || None);
+    let mut handles = vec![];
+    for (shard, (socket, tcp)) in sockets.into_iter().zip(tcp_links).enumerate() {
+        let advertised = SocketAddr::new(config.public_ip, socket.local_addr()?.port());
         let tcp_advertised = tcp.as_ref().map(|t| t.local);
         let (tx, rx) = std::sync::mpsc::channel();
         let (tx, wake) = livekit::engine::Commands::new(tx, socket.local_addr()?)?;
@@ -278,9 +293,13 @@ async fn main() -> Result<()> {
         };
         let webhooks = webhooks.clone();
         let (agents, back) = (agents.clone(), tx.clone());
+        let cpu = cpus.get(shard).copied();
         std::thread::Builder::new()
             .name(format!("rtc-{shard}"))
             .spawn(move || {
+                if let Some(cpu) = cpu {
+                    util::pin_to_cpu(cpu);
+                }
                 let run = AssertUnwindSafe(|| {
                     livekit::engine::run(
                         shard,

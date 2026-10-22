@@ -195,7 +195,11 @@ pub fn video_params(pc: Pc, congestion: Congestion) -> Vec<PayloadParams> {
 /// The connection, with a UDP host candidate and, when ICE/TCP is on, a
 /// passive TCP one (RFC 6544): clients connect to it when UDP is blocked.
 /// ICE prefers UDP, so it is used only then.
-fn finish(config: RtcConfig, advertised: SocketAddr, tcp: Option<SocketAddr>) -> Box<Rtc> {
+fn finish(mut config: RtcConfig, advertised: SocketAddr, tcp: Option<SocketAddr>) -> Box<Rtc> {
+    if tcp.is_some() {
+        // The engines share one ICE/TCP port, which tells them apart by this.
+        config = config.set_ice_ufrag_prefix(super::tcp::ufrag_prefix(advertised.port()));
+    }
     let mut rtc = Box::new(config.build(Instant::now()));
     rtc.add_local_candidate(Candidate::host(advertised, "udp").expect("a host candidate"));
     if let Some(tcp) = tcp {
