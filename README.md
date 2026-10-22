@@ -8,8 +8,10 @@ server forwards the packets, undecoded, to everyone else in the room, with
 rooms spread over one engine per core. Video covers VP8, H.264, VP9, AV1
 and H.265 with resends and keyframe requests, and simulcast with each
 subscriber getting the layer its video size needs (adaptive stream) and
-publishers told which layers anyone watches (dynacast); congestion
-control is next ([plan](docs/livekit/PARITY.md)). LiveKit's own SDKs and tools (`lk`,
+publishers told which layers anyone watches (dynacast), SVC for VP9 and
+AV1, and congestion control. Beyond media it has LiveKit's server API and
+webhooks, ICE/TCP and TURN fallback, WHIP ingest, agent dispatch and
+multi-node rooms over Redis. LiveKit's own SDKs and tools (`lk`,
 `livekit-client`, the Go and Rust SDKs) connect to natter unchanged. The
 web client is Leptos compiled to WASM, speaking the same protocol through
 the browser's WebRTC stack.
@@ -17,21 +19,21 @@ the browser's WebRTC stack.
 ## How it compares
 
 Against LiveKit 1.13.10, driven by the same client on the same machine
-(audio rooms of 4 publishers + 4 subscribers, no loss at any load):
+(audio rooms of 4 publishers + 4 subscribers, no loss added, 2026-10-22):
 
 | Rooms | Packets forwarded/s | natter CPU · memory | LiveKit CPU · memory |
 |---|---|---|---|
-| 8 | 6,400 | 6% · 48 MiB | 11% · 194 MiB |
-| 30 | 24,000 | 24% · 137 MiB | 45% · 662 MiB |
-| 60 | 48,000 | 55% · 262 MiB | 90% · 1.3 GiB |
-| 100 | 80,000 | 106% · 427 MiB | 157% · 2.0 GiB |
+| 8 | 6,400 | 5% · 61 MiB | 16% · 194 MiB |
+| 30 | 24,000 | 19% · 171 MiB | 53% · 650 MiB |
+| 60 | 48,000 | 47% · 318 MiB | 104% · 1.3 GiB |
+| 100 | 80,000 | 100% · 525 MiB | 163% · 2.0 GiB |
 
-CPU as a share of one core. natter also recovers more of a 5% packet loss
-(0.002% left vs 0.26%). LiveKit sets clients up a little faster when many
-join a busy server at once (p99 0.28 s vs 0.36 s at 60 rooms), which
-`NATTER_DTLS_CRYPTO=aws-lc` closes; and it does far more (video, TURN,
-server APIs). Charts, latency,
-str0m's own chat example, other SFUs and method:
+CPU as a share of one core. At 100 rooms LiveKit lost 0.06–0.15% of
+packets, natter none. natter also recovers more of a 5% packet loss
+(0.002% left vs 0.26%), and sets clients up as fast or faster (setup p99
+170–193 ms vs 317–383 ms at 100 rooms). LiveKit has egress, ingress and
+SIP, which natter doesn't. Charts, latency, str0m's own chat example,
+other SFUs and method:
 [`docs/benchmarks`](docs/benchmarks/README.md). What natter supports and
 plans, next to LiveKit, mediasoup, Janus, Galène, Jitsi and MediaMTX:
 [`docs/feature-parity.md`](docs/feature-parity.md).

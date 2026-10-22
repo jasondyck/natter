@@ -20,11 +20,25 @@ Reference material in this directory, all from the v1.13.10 tag and the
 Wire types come from the `livekit-protocol` crate 0.8.1, whose protos are
 identical to the server's pinned ones.
 
-## Status and next steps (2026-10-19)
+## Status and next steps (2026-10-22)
 
 All phases are done (1-9), apart from the open items below and under each
-phase. Merged on master through #28 (multi-node). New work branches from
-master.
+phase. New work branches from master.
+
+**Since phase 9** (pull requests #2-#9 of this repository):
+- LiveKit mismatches fixed (below).
+- Running as Stoat's voice server: mute webhooks, a writable `/data` in
+  the image, one ICE/TCP port shared by all engines (Stoat publishes only
+  7881), HTTP on the config's port in Docker. Against Stoat's LiveKit
+  (v1.9.14) at 100 audio rooms: 106% of a core against 164-172%, 530 MiB
+  against 2.4 GiB.
+- Joins: engines pinned to a CPU each, fill 120 participants before the
+  next engine is used (was 250), leaves reach the room at once.
+- Forwarding CPU: SCTP not walked when idle, `recvmmsg`/`sendmmsg` with
+  UDP GSO for runs to one address, SRTP on aws-lc in aws-lc builds, and
+  str0m releasing written packets without a full timeout (#7, #8): about
+  a quarter less CPU per forwarded audio packet and half per video
+  packet.
 
 **LiveKit mismatches** (`bench/e2e/sstate.mjs`, `shutdown.mjs`,
 `perms.mjs`, each run against both servers):
@@ -90,6 +104,8 @@ Timing each stage found:
    - WHEP.
    - Multi-node: Redis TLS/Sentinel/Cluster, draining that waits for
      rooms, several replicas on Kubernetes (UDP ports per pod).
+   - Forwarding CPU: after #8, forwarding video at 15 rooms is about half
+     kernel send path and a fifth str0m's `poll_output`.
 
 **How each piece was checked.** The JS SDK scenarios since #21, and the
 Python agent scenarios, are in `bench/e2e/` (`setup.sh`, `run.sh
