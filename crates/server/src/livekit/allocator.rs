@@ -170,6 +170,22 @@ pub fn probe_goal(usage: u64, cheapest_step: Option<u64>) -> u64 {
         })
 }
 
+/// The budget upgrades are allocated against: what is sent now plus the
+/// largest step the estimate covers with the probe's overage, so a step is
+/// taken only once the estimate has reached what probing for it aims at
+/// (LiveKit's probe goal: a probe succeeds when the estimate reaches
+/// usage + overage). Taking a step as soon as the estimate covers its bare
+/// cost left no margin: on a 1 Mbit/s link with a 150 ms round trip GCC's
+/// estimate creeps to 1.08 Mbit/s, which covered two `h` tracks, and the
+/// queue that built until the detector saw it cost 600 ms of latency.
+pub fn upgrade_budget(usage: u64, peak: u64) -> u64 {
+    let headroom = peak.saturating_sub(usage);
+    if headroom < PROBE_MIN_BPS {
+        return usage;
+    }
+    usage + (headroom as f64 / PROBE_OVERAGE) as u64
+}
+
 /// Evidence that the link to a subscriber is congested now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Congestion {
@@ -208,7 +224,8 @@ pub enum Change {
 impl Hold {
     /// Feeds a fresh allocation: `fits` from the current estimate (for
     /// going down), `fits_up` from the peak estimate since the last
-    /// congestion (for going up; see `PEAK_WINDOW`). `may_upgrade` is false
+    /// congestion, within `upgrade_budget` (for going up; see
+    /// `PEAK_WINDOW`). `may_upgrade` is false
     /// while another of the subscriber's tracks went up within `hold`.
     pub fn update(
         &mut self,
@@ -231,7 +248,7 @@ impl Hold {
             self.applied = Some(fits);
             return Change::Down;
         }
-        if fits_up.max(fits) <= applied {
+        if fits_up <= applied {
             self.higher_since = None;
             return Change::None;
         }
@@ -240,7 +257,7 @@ impl Hold {
             return Change::None;
         }
         let step = applied.map_or(0, |s| s.saturating_add(1));
-        self.applied = Some(Some(step).min(fits_up.max(fits)));
+        self.applied = Some(Some(step).min(fits_up));
         self.higher_since = None;
         Change::Up
     }
@@ -302,6 +319,26 @@ mod tests {
         assert_eq!(probe_goal(300_000, Some(350_000)), 720_000);
         assert_eq!(probe_goal(300_000, Some(100_000)), 500_000, "at least 200k");
         assert_eq!(probe_goal(300_000, None), 300_000);
+    }
+
+    #[test]
+    fn upgrades_need_the_probe_goal() {
+        // Each step is taken exactly when the estimate reaches its probe goal.
+        for (usage, step) in [
+            (300_000, 350_000),
+            (300_000, 100_000),
+            (1_000_000, 1_000_000),
+        ] {
+            let goal = probe_goal(usage, Some(step));
+            assert!(
+                upgrade_budget(usage, goal) >= usage + step,
+                "{usage} {step}"
+            );
+            assert!(
+                upgrade_budget(usage, goal - 2_000) < usage + step,
+                "{usage} {step}"
+            );
+        }
     }
 
     #[test]

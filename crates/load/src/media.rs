@@ -80,6 +80,9 @@ pub struct Options {
     pub loss_up: f64,
     pub video: VideoOptions,
     pub downlink: Option<LinkOptions>,
+    /// Audio is counted apart from video (`Report::audio`), for rooms with
+    /// both.
+    pub split_audio: bool,
 }
 
 /// What video publishers send: VP8 frames of a fixed size at a fixed rate,
@@ -318,6 +321,8 @@ pub struct ConnStatus {
 #[derive(Default)]
 pub struct Report {
     pub receipts: Receipts,
+    /// Audio packets, when counted apart (`Options::split_audio`).
+    pub audio: Receipts,
     /// Measured packets sent, by publisher id.
     pub sent: Vec<(u32, u64)>,
     pub conns: Vec<ConnStatus>,
@@ -440,6 +445,7 @@ struct Net {
     options: Options,
     rng: Rng,
     receipts: Receipts,
+    audio: Receipts,
     sent: HashMap<u32, u64>,
     dropped_down: u64,
     dropped_up: u64,
@@ -482,6 +488,7 @@ impl Loop {
                 options,
                 rng: Rng(0x9E37_79B9_7F4A_7C15 ^ (seed + 1).wrapping_mul(0xD1B5_4A32_D192_ED03)),
                 receipts: Receipts::default(),
+                audio: Receipts::default(),
                 sent: HashMap::new(),
                 dropped_down: 0,
                 dropped_up: 0,
@@ -636,8 +643,11 @@ impl Loop {
     fn report(&self) -> Report {
         let mut receipts = Receipts::default();
         receipts.merge(&self.net.receipts);
+        let mut audio = Receipts::default();
+        audio.merge(&self.net.audio);
         Report {
             receipts,
+            audio,
             sent: self.net.sent.iter().map(|(&p, &n)| (p, n)).collect(),
             conns: self
                 .conns
@@ -817,7 +827,12 @@ fn event(conn: &mut Conn, event: Event, net: &mut Net) {
             let fresh = stream.insert(stamp.seq);
             if stamp.measured() {
                 let now_us = net.shared.micros(Instant::now());
-                net.receipts.record(fresh, &stamp, now_us);
+                let receipts = if net.options.split_audio {
+                    &mut net.audio
+                } else {
+                    &mut net.receipts
+                };
+                receipts.record(fresh, &stamp, now_us);
             }
         }
         Event::KeyframeRequest(req) => {

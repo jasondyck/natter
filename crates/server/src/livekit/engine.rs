@@ -2717,7 +2717,23 @@ impl Engine {
             p.cc.peak = Some((estimate, now));
         }
         let peak = p.cc.peak.map_or(estimate, |(b, _)| b);
-        let alloc_up = allocator::allocate(peak.saturating_sub(audio_bps), &tracks);
+        let usage = audio_bps
+            + keys
+                .iter()
+                .zip(&tracks)
+                .map(|(&k, t)| {
+                    allocator::usage_bps(t, p.downtracks[k].hold.applied.unwrap_or(None))
+                })
+                .sum::<u64>();
+        // GCC goes below what is sent only on an overuse signal (while the
+        // sender is application-limited it stays above): no upgrade then,
+        // whatever the peak.
+        let up = if estimate < usage {
+            usage
+        } else {
+            allocator::upgrade_budget(usage, peak)
+        };
+        let alloc_up = allocator::allocate(up.saturating_sub(audio_bps), &tracks);
         // A step down with congestion before an upgrade has held for
         // `BACKOFF_RESET`: that upgrade failed (a small overload can take
         // seconds to fill a queue), so back off. One that has held that

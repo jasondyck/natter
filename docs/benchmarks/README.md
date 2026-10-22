@@ -193,8 +193,8 @@ client, which `natter-load` doesn't send).
 | 4 → 1 Mbit/s: frames not shown (lost + undecodable), loopback / 60 / 150 ms | 7.0–7.5 / 8.9–9.3 / 7.4–9.2% | 26 / 23 / 20% |
 | 4 → 1 Mbit/s: p99 latency | 599–601 / 657–684 / 772–814 ms | 1061 / 766 / 1094 ms |
 | 4 Mbit/s: frames on `f` | 96–99 / 87–98 / 91–92% | 100 / 100 / 100% |
-| 1 Mbit/s: p99 latency | 37–38 / 104–106 / 279–289 ms | 15 / 100 / 196 ms |
-| 1 Mbit/s: layers | one track `h`, one `q` | both `q` (83–100%) |
+| 1 Mbit/s: p99 latency | 34–37 / 95–98 / 196–245 ms (median 204) | 15 / 100 / 196 ms |
+| 1 Mbit/s: layers | `q`, one track `h` for 8–50% of frames | both `q` (83–100%) |
 | Server CPU | 1.2–2.6% of a core | 3.6–4.7% |
 
 No frame was lost on a steady link by either. natter ranges are two runs;
@@ -203,10 +203,54 @@ run. Audio-only rooms pay 2–5% more CPU with congestion control on (30
 rooms of 4 + 4: 24.7–25.2% against 23.9–24.2%, two sessions).
 
 When the link shrinks, natter loses a third as many frames as LiveKit and
-shows far fewer undecodable ones, with lower latency. What is left: at
-1 Mbit/s natter runs one track on `h`, which fits, but on a 150 ms path
-its probes and keyframes cost latency LiveKit doesn't pay by staying on
-`q`; and natter reaches `f` slightly less on longer paths.
+shows far fewer undecodable ones, with lower latency. natter reaches `f`
+slightly less on longer paths.
+
+The 1 Mbit/s rows are from 2026-10-22 (the rest from 2026-10-18). At
+150 ms natter's p99 was 279–289 ms, then 213–272 ms (median 236) on the
+same machine that day, and is now 196–215 ms in 11 of 12 runs (one
+245 ms). It came from upgrades that didn't fit: GCC's estimate creeps to
+about 1.08 Mbit/s on that path, which covered a second `h` track, and the
+queue built for ~600 ms before the detector saw it; and from upgrades
+taken on the 10 s peak while the current estimate had already fallen
+below what was sent. Both are closed in step 3 below.
+
+What is left of the gap is the video natter sends: on that link it keeps
+one track on `h` much of the time, LiveKit stays on `q`. With subscribers
+asking for `q` only (`natter-load --sub-quality q`), so both servers send
+the same, natter is ahead. Five interleaved runs of each, the same session:
+
+| 1 Mbit/s, 150 ms | p50 | p99 | frames on `h` |
+|---|---|---|---|
+| natter, subscribers ask for `q` | 172–173 ms | 186–187 ms | 0 |
+| LiveKit | 173–175 ms | 191–218 ms (median 199) | 0–8% |
+| natter | 178–184 ms | 203–266 ms (median 207) | 27–50% |
+
+An `h` frame is about three times a `q` frame, ~17 ms through the link
+against ~5, and keyframes four times that; LiveKit's p99 rises the same
+way in the runs where it tries `h`. Raw results in
+[`data/2026-10-22/congestion/same-video`](data/2026-10-22/congestion/same-video).
+
+**With audio on the same link.** One more participant per room sending
+audio (`--audio-publishers 1`), so each subscriber's 1 Mbit/s carries its
+audio too; five interleaved runs each:
+
+| 1 Mbit/s, 150 ms | audio p50 | audio p99 | audio lost | video lost |
+|---|---|---|---|---|
+| natter | 172–177 ms | 186–203 ms | 0 | 0 |
+| natter, subscribers ask for `q` | 171–173 ms | 184–190 ms | 0 | 0 |
+| LiveKit | 173–640 ms | 201 ms once, else 802–871 ms | 0 once, else 3.2–15.6% | 0 once, else 17–66% |
+
+natter's upgrades to `h` cost its audio ~10 ms at p99. LiveKit overloaded
+the link in four runs of five (14,000–175,000 packets dropped by the
+bottleneck's queue, against ~4,000 without the audio participant):
+counting what reached the bottleneck in one such run, it sent more video
+resends (RTX, ~1100 bytes) than original video packets, on the `h` and `f`
+layers rather than `q`, and the audio queued and was dropped behind them.
+Why the audio participant sets this off isn't pinned down, nor whether
+`natter-load`'s receiver (str0m's NACKs, not Chrome's) plays a part.
+Raw results in
+[`data/2026-10-22/congestion/with-audio`](data/2026-10-22/congestion/with-audio).
 
 **How it works** (`crates/server/src/livekit/allocator.rs`):
 
@@ -231,7 +275,10 @@ its probes and keyframes cost latency LiveKit doesn't pay by staying on
    throughput while application-limited, so after a probe shows room it
    sinks back before an upgrade's hold is over. Upgrades use the highest
    estimate since the last congestion (10 s), as LiveKit commits a
-   probe's result.
+   probe's result. A step is taken only once that peak reaches the step's
+   probe goal (usage + 120% of the step, at least + 200 kbit/s), as
+   LiveKit's probe succeeds only at its goal, and not while the current
+   estimate is below what is sent (GCC only goes there on overuse).
 4. **One step at a time, with backoff.** One layer per report interval
    plus round trip; after an upgrade or probe that brought congestion,
    the next waits 3 s × 1.5ⁿ (LiveKit's probe regulator), and no probing
@@ -263,7 +310,10 @@ its probes and keyframes cost latency LiveKit doesn't pay by staying on
 | Loss window | 1 s | chosen (one report interval) |
 | Allocation interval | 100 ms | chosen (housekeeping tick) |
 
-Raw results in [`data/2026-10-18/congestion-grid`](data/2026-10-18/congestion-grid)
+Raw results in [`data/2026-10-22/congestion`](data/2026-10-22/congestion)
+(`grid`: the whole grid before (`base`) and after (`new`) the upgrade
+margin, two rounds; `rtt150-1000`: twelve more runs of that cell) and
+[`data/2026-10-18/congestion-grid`](data/2026-10-18/congestion-grid)
 (`baseline`: LiveKit and natter before this work; `detector`,
 `detector-audio`: natter now; `final`, `final-steps`, `audio`: before
 the TWCC detector). To reproduce a cell:

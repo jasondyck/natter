@@ -90,8 +90,6 @@ Timing each stage found:
   the token check, as LiveKit's.
 
 **Next:** the open items, in order:
-   - Congestion control at 1 Mbit/s on a 150 ms path: p99 285 ms
-     against LiveKit's 196 ms.
    - Temporal layers by `fps`.
    - DD rewrite (`DDForwarder`).
    - Stream trackers as LiveKit's.
@@ -326,8 +324,11 @@ track and LOW for the other, no loss.
       delay, loss, delivered rate; vendored `Event::TwccFeedback`): when
       the link shrinks, a third of LiveKit's frame loss (3–4% vs 9–10%),
       undecodable frames well under, lower p99
-- [ ] 1 Mbit/s on a 150 ms path: p99 ~285 ms against LiveKit's 196
-      (natter runs one track on `h`, LiveKit stays on `q`)
+- [x] 1 Mbit/s on a 150 ms path: p99 196–215 ms (median 204) against
+      LiveKit's 196, was ~285: upgrades wait for the probe goal and not
+      while the estimate is below usage. A grace after a congesting probe
+      (keep the layers, as LiveKit's committed capacity) was tried and
+      made it worse (p99 ~330 ms): the queue it left didn't drain
 - [ ] Unmanaged (single-layer) screen shares exempt, as LiveKit; temporal
       layers; per-track priority (unused by LiveKit 1.13.10 too)
 - [ ] Not browser-tested under a real bottleneck (Chrome's network
