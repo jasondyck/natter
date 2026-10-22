@@ -210,7 +210,7 @@ Before video, which multiplies packet rates: a 10-person video call is
 
 - [x] One engine thread and UDP port per shard (`NATTER_SHARDS`, default
       one per core), each owning whole rooms. A room is placed when it
-      starts: shards fill to `NATTER_SHARD_FILL` (250) one at a time,
+      starts: shards fill to `NATTER_SHARD_FILL` (120; 250 before engines were pinned) one at a time,
       counting new rooms as 8, then the least loaded; placement is
       reference-counted by participants so a room never splits
 - [x] Signalling routes joins and resumes by room; gauges and the

@@ -79,6 +79,21 @@ assembly, off by default) setup at 30 rooms is p50 0.20 s, p99
 in pure Rust (interleaved). Spreading rooms over all engines
 (`NATTER_SHARD_FILL=16`) also removes it, at some CPU cost per packet.
 
+Since engines are pinned to a CPU each, a quiet engine costs less, and the
+default fill is 120 instead of 250: a burst of joins then queues on twice
+as many engines. Audio rooms (4+4) with `natter-load`, two interleaved
+rounds, setup p50/p99 in ms and CPU:
+
+| rooms | fill 250 | fill 160 | fill 120 |
+|---|---|---|---|
+| 30 | 85/186, 23% | 62/163, 24% | 59/147, 24% |
+| 60 | 124/226–229, 54% | 89/175, 54% | 72–76/155–167, 53% |
+| 100 | 162–183/286–308, 100% | 113/186, 103% | 101–120/204–221, 106–107% |
+
+Stoat's LiveKit (v1.9.14) on the same machine: 91–94/143–156 ms at 30
+rooms (47%), 99–101/175–178 ms at 60 (95%), 107–119/270–342 ms at 100
+(164–172%).
+
 **Cores.** natter runs one media engine per core and gives each room
 wholly to one engine. Rooms fill one engine (250 participants) before the
 next is used, so up to 30 rooms here ran on one core and 100 rooms on

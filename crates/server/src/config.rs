@@ -1226,7 +1226,7 @@ impl Settings {
             max_peers: env_parse("NATTER_MAX_PEERS")?.unwrap_or(200),
             remote_unmute: env_parse("NATTER_REMOTE_UNMUTE")?
                 .unwrap_or(lk.room.enable_remote_unmute.unwrap_or(false)),
-            shard_fill: env_parse("NATTER_SHARD_FILL")?.unwrap_or(250),
+            shard_fill: env_parse("NATTER_SHARD_FILL")?.unwrap_or(120),
             pin_engines: env("NATTER_PIN_ENGINES").is_none_or(|v| v != "off"),
             // A build with aws-lc was made to use it.
             dtls_crypto: env("NATTER_DTLS_CRYPTO")
