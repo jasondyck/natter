@@ -192,6 +192,19 @@ fresh random ones. Now the prefix is kept on the `Rtc` and every local
 ufrag it generates starts with it (`lib.rs` `new_ice_creds`, the two
 restart paths in `change/sdp.rs`).
 
+### Patch: SCTP not walked when nothing changed
+
+Every `Rtc::poll_output` that got past media ended in `RtcSctp::poll`,
+which walks the association (retransmit and control queues, every stream's
+reassembly) whether or not anything happened: ~7% of an engine's time
+forwarding audio, with data channels that carried nothing. `RtcSctp` now
+remembers that its last walk found nothing (`idle`) and skips the next
+until something can change it: input, a due association timer, endpoint
+events, or any call that writes, opens, closes or configures. A stream
+whose open is being retried keeps it walking. 100 audio rooms: 13.3 →
+12.0 µs of CPU per forwarded packet (−10%); the data-channel e2e
+scenarios (data, RPC, streams, replay, data tracks, resume) unchanged.
+
 ## is 0.11.1
 
 str0m's ICE agent, vendored the same way (first commit as published).

@@ -54,6 +54,11 @@ pub(crate) struct RtcSctp {
     reset_complete: VecDeque<u16>,
     pushed_back_transmit: Option<VecDeque<Vec<u8>>>,
     last_now: Instant,
+    /// natter: the last `do_poll` found nothing, and nothing has happened
+    /// since that could change it, so `poll` skips walking the association
+    /// (its queues, timers and every stream): that walk ended every
+    /// `Rtc::poll_output` and was ~6% of forwarding with idle channels.
+    idle: bool,
     client: bool,
     remote_max_message_size: u32,
     snap_enabled: bool,
@@ -313,6 +318,7 @@ impl RtcSctp {
             reset_complete: VecDeque::new(),
             pushed_back_transmit: None,
             last_now: Instant::now(), // placeholder until init()
+            idle: false,
             client: false,
             remote_max_message_size: DEFAULT_REMOTE_MAX_MESSAGE_SIZE,
             snap_enabled: false,
@@ -347,6 +353,7 @@ impl RtcSctp {
         sctp_init_data: Option<SctpInitData>,
         remote_max_message_size: Option<u32>,
     ) -> Result<(), SctpError> {
+        self.idle = false;
         if self.state != RtcSctpState::Uninited {
             return Err(SctpError::Proto(ProtoError::Other(
                 "SCTP already initialized".into(),
@@ -423,11 +430,13 @@ impl RtcSctp {
 
     /// Enable SNAP by pre-populating the init data.
     pub fn enable_snap(&mut self) {
+        self.idle = false;
         self.snap_enabled = true;
         self.snap_init.get_or_insert_with(SctpInitData::new);
     }
 
     pub fn set_max_buffered_amount(&mut self, max_buffered_amount: usize) {
+        self.idle = false;
         self.max_buffered_amount = max_buffered_amount;
     }
 
@@ -439,6 +448,7 @@ impl RtcSctp {
     /// Ensure the local SNAP INIT chunk is generated. Returns `false` if
     /// generation failed (degrades to non-SNAP).
     pub fn ensure_local_snap_init(&mut self) -> bool {
+        self.idle = false;
         let init_data = self.snap_init.get_or_insert_with(SctpInitData::new);
         if init_data.local_init_chunk().is_err() {
             self.snap_init = None;
@@ -452,6 +462,7 @@ impl RtcSctp {
     ///
     /// This preserves local opt-in for future offers.
     pub fn disable_pending_snap(&mut self) {
+        self.idle = false;
         if !self.is_inited() {
             self.snap_init = None;
         }
@@ -489,6 +500,7 @@ impl RtcSctp {
     /// Set the remote SNAP INIT from a base64 string. Returns `Ok(true)` if
     /// accepted, `Ok(false)` on decode error (degrades to non-SNAP).
     pub fn set_remote_snap_init_string(&mut self, value: &str) -> bool {
+        self.idle = false;
         let init_data = self.snap_init.get_or_insert_with(SctpInitData::new);
         match init_data.set_remote_init_string(value) {
             Ok(()) => true,
@@ -511,6 +523,7 @@ impl RtcSctp {
 
     /// Opens a new stream.
     pub fn open_stream(&mut self, id: u16, config: ChannelConfig) {
+        self.idle = false;
         // The channel might already have arrived via SCTP, and if it is negotiated out-of-band
         // we are waiting for the configuration.
         let entry = stream_entry(
@@ -565,6 +578,7 @@ impl RtcSctp {
 
     /// Close stream.
     pub fn close_stream(&mut self, id: u16) {
+        self.idle = false;
         if let Some(entry) = entry_by_id_mut(&mut self.entries, id) {
             entry.do_close = true;
 
@@ -574,6 +588,7 @@ impl RtcSctp {
     }
 
     pub fn close(&mut self) -> Result<(), SctpError> {
+        self.idle = false;
         let Some(assoc) = &mut self.assoc else {
             return Ok(());
         };
@@ -599,6 +614,7 @@ impl RtcSctp {
 
     // TODO: fix sctp-proto so we don't need &mut here.
     pub fn available(&mut self) -> usize {
+        self.idle = false;
         let Some(assoc) = &mut self.assoc else {
             return 0;
         };
@@ -619,6 +635,7 @@ impl RtcSctp {
     }
 
     pub fn write(&mut self, id: u16, binary: bool, buf: &[u8]) -> Result<usize, SctpError> {
+        self.idle = false;
         if self.state != RtcSctpState::Established || self.is_closing() || self.is_closed() {
             return Err(SctpError::WriteBeforeEstablished);
         }
@@ -652,6 +669,7 @@ impl RtcSctp {
     }
 
     pub fn buffered_amount(&mut self, id: u16) -> usize {
+        self.idle = false;
         let Some(assoc) = self.assoc.as_mut() else {
             return 0;
         };
@@ -664,6 +682,7 @@ impl RtcSctp {
     }
 
     pub fn set_buffered_amount_low_threshold(&mut self, id: u16, threshold: usize) {
+        self.idle = false;
         let entry =
             entry_by_id_mut(&mut self.entries, id).expect("stream entry for valid channel id");
 
@@ -672,6 +691,7 @@ impl RtcSctp {
     }
 
     pub fn handle_input(&mut self, now: Instant, data: &[u8]) {
+        self.idle = false;
         trace!("Handle input: {}", data.len());
 
         // TODO, remove Bytes in sctp and just use &[u8].
@@ -720,10 +740,16 @@ impl RtcSctp {
             return;
         };
 
+        // Called on every `Rtc` timeout: only a due timer can change what
+        // `do_poll` finds.
+        if assoc.poll_timeout().is_some_and(|t| t <= now) {
+            self.idle = false;
+        }
         assoc.handle_timeout(now);
 
         // propagate events between endpoint and association.
         while let Some(e) = assoc.poll_endpoint_event() {
+            self.idle = false;
             if let Some(ae) = self.endpoint.handle_event(self.handle, e) {
                 assoc.handle_event(ae);
             }
@@ -731,7 +757,16 @@ impl RtcSctp {
     }
 
     pub fn poll(&mut self) -> Option<SctpEvent> {
+        if self.idle {
+            return None;
+        }
         let r = self.do_poll();
+        // A stream whose open is being retried re-attempts on every poll.
+        self.idle = r.is_none()
+            && !self
+                .entries
+                .iter()
+                .any(|e| e.state == StreamEntryState::AwaitOpen);
 
         if let Some(r) = &r {
             trace!("Poll {:?}", r);
@@ -1162,6 +1197,7 @@ impl RtcSctp {
     }
 
     pub fn push_back_transmit(&mut self, data: VecDeque<Vec<u8>>) {
+        self.idle = false;
         trace!("Push back transmit: {}", data.len());
         assert!(self.pushed_back_transmit.is_none());
         self.pushed_back_transmit = Some(data);
