@@ -138,6 +138,10 @@ pub(crate) struct Session {
     /// natter: the soonest deadline from the last `poll_timeout` other than
     /// the pacer's and unstamped writes' (`handle_send_timeout`).
     non_send_at: Option<Instant>,
+    /// natter: `poll_event`'s "the estimator can probe", as of the last
+    /// full timeout: working it out walks every m-line's extensions and
+    /// codecs, and `poll_event` runs on every `poll_output`.
+    can_probe: bool,
 
     /// Pending RRTRs from remote SSRCs in FIFO order, deduplicated by SSRC.
     /// A new RRTR for an already-pending SSRC updates its value in place.
@@ -239,6 +243,7 @@ impl Session {
             feedback_rx: VecDeque::new(),
             rtp_closing: false,
             non_send_at: None,
+            can_probe: false,
             pending_rrtrs: VecDeque::new(),
             twcc_feedback: config.twcc_feedback_events.then(VecDeque::new),
             raw_packets: if config.enable_raw_packets {
@@ -303,6 +308,9 @@ impl Session {
         if self.rtp_closing {
             return Ok(());
         }
+
+        self.can_probe =
+            self.bwe.is_some() && self.srtp_tx.is_some() && self.probe_media().is_some();
 
         // Payload ready media.
         self.do_payload(now)?;
@@ -1027,8 +1035,7 @@ impl Session {
             }
         }
 
-        let can_probe =
-            self.bwe.is_some() && self.srtp_tx.is_some() && self.probe_media().is_some();
+        let can_probe = self.can_probe;
         if let Some(bwe) = &mut self.bwe {
             // Drain estimates even while unavailable so they cannot be delivered later.
             let estimate = bwe.poll_estimate();

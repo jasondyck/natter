@@ -232,6 +232,16 @@ to. Audio, 100 rooms: 2.7 `poll_output` calls per forwarded packet and full
 timeouts from ~2 per forward to almost none; 11.7 → 10.6 µs of CPU per
 forward. Video: 33.9 → 31.5 µs, latency p99 3.8 → 1.5 ms.
 
+### Patch: "can probe" worked out per timeout, not per poll
+
+`Session::poll_event`, called on every `Rtc::poll_output`, decided whether
+the estimator could probe by walking every m-line's extension map and
+codec list (`probe_media`): most of `ExtensionMap::id_of`'s share of an
+engine. It is now worked out once per full `handle_timeout` and kept
+(`can_probe`); it only changes with renegotiation, which a timeout always
+follows. Audio, 100 rooms: 10.8 → 10.4 µs of CPU per forward; the
+congestion grid as before.
+
 ## is 0.11.1
 
 str0m's ICE agent, vendored the same way (first commit as published).
