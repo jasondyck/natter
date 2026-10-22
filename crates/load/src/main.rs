@@ -95,13 +95,13 @@ struct Args {
     /// queue (--down-queue-ms) that drops packets when full.
     #[arg(long)]
     down_kbps: Option<u64>,
-    #[arg(long, default_value = "200ms", value_parser = parse_duration)]
+    #[arg(long, default_value = "200ms", value_parser = parse_ms)]
     down_queue_ms: Duration,
     /// Delay past the bottleneck, standing for the whole round trip.
-    #[arg(long, default_value = "0ms", value_parser = parse_duration)]
+    #[arg(long, default_value = "0ms", value_parser = parse_ms)]
     down_delay_ms: Duration,
     /// Up to this much more per packet, uniformly, keeping order.
-    #[arg(long, default_value = "0ms", value_parser = parse_duration)]
+    #[arg(long, default_value = "0ms", value_parser = parse_ms)]
     down_jitter_ms: Duration,
     /// Change the downlink capacity during the run: `KBPS@TIME`, TIME after
     /// measuring starts (e.g. `500@10s`).
@@ -146,6 +146,15 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
         _ => return Err(format!("bad duration unit in {s:?}")),
     };
     Ok(Duration::from_secs_f64(secs))
+}
+
+/// For the `--*-ms` flags: a bare number is milliseconds, as the name says
+/// (`--down-delay-ms 60` was a minute); with a unit, as `parse_duration`.
+fn parse_ms(s: &str) -> Result<Duration, String> {
+    match s.parse::<f64>() {
+        Ok(ms) => Ok(Duration::from_secs_f64(ms / 1000.0)),
+        Err(_) => parse_duration(s),
+    }
 }
 
 fn parse_step(s: &str) -> Result<(u64, Duration), String> {
@@ -626,5 +635,8 @@ mod tests {
         assert_eq!(parse_duration("250ms"), Ok(Duration::from_millis(250)));
         assert_eq!(parse_duration("2m"), Ok(Duration::from_secs(120)));
         assert!(parse_duration("2h").is_err());
+        assert_eq!(parse_ms("60"), Ok(Duration::from_millis(60)));
+        assert_eq!(parse_ms("60ms"), Ok(Duration::from_millis(60)));
+        assert_eq!(parse_ms("1s"), Ok(Duration::from_secs(1)));
     }
 }
