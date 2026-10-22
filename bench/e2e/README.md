@@ -6,6 +6,9 @@ saw, in a stable order. Run it against LiveKit 1.13.10 and against natter,
 then diff the two outputs: they should match, apart from the differences
 listed in `docs/livekit/PARITY.md` ("Deliberate differences").
 
+What the scripts share (playwright, URLs, dev-key tokens and grants, the
+browser, RoomService calls, the webhook receiver) is in `lib.mjs`.
+
 | Script | Covers |
 |---|---|
 | `perms.mjs` | Subscription permissions: per-identity/per-track grants, revoke, regrant, unsubscribe, recorder exemption |
@@ -14,7 +17,7 @@ listed in `docs/livekit/PARITY.md` ("Deliberate differences").
 | `data.mjs` | Data packets with destinations, text and byte streams, RPC and its errors |
 | `raw.mjs` | Crafted data packets: agents speaking for others, transcriptions, sid destinations, resends |
 | `dtrack.mjs` | Data tracks: publish errors, frames, permissions, unpublish |
-| `dtresume.mjs` | Data tracks across a signal resume |
+| `dtresume.mjs` | Data tracks across a signal resume (`dtrack.mjs` with `DT_RESUME=1`) |
 | `trailer.mjs` | Packet trailers (frame metadata) with and without the worker |
 | `e2ee.mjs` | End-to-end encryption with the right and a wrong key |
 | `joindata.mjs` | Reliable data to a participant while it joins |

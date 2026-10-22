@@ -701,6 +701,50 @@ impl Participant {
         })
     }
 
+    /// Takes a name, metadata and attributes update, from the participant
+    /// or an admin: empty leaves the name or metadata as they are, and
+    /// removes an attribute.
+    fn apply_info(
+        &mut self,
+        name: String,
+        metadata: String,
+        attributes: impl IntoIterator<Item = (String, String)>,
+    ) {
+        if !name.is_empty() {
+            self.name = name;
+        }
+        if !metadata.is_empty() {
+            self.metadata = metadata;
+        }
+        for (k, v) in attributes {
+            if v.is_empty() {
+                self.attributes.remove(&k);
+            } else {
+                self.attributes.insert(k, v);
+            }
+        }
+    }
+
+    /// Sends the subscriber PC's offer (filtered to the transport it is
+    /// held to) and waits for the answer.
+    fn send_sub_offer(
+        &mut self,
+        offer: SdpOffer,
+        pending: SdpPendingOffer,
+        mid_to_track_id: HashMap<String, String>,
+        now: Instant,
+    ) {
+        self.sub_offer_id += 1;
+        self.send(signal_response::Message::Offer(lk::SessionDescription {
+            r#type: "offer".into(),
+            sdp: fallback::filter_sdp(&offer.to_sdp_string(), self.fallback.pref),
+            id: self.sub_offer_id,
+            mid_to_track_id,
+        }));
+        self.sub_pending = Some(pending);
+        self.sub_pending_since = Some(now);
+    }
+
     fn reply(&mut self, request_id: u32, reason: request_response::Reason, message: &str) {
         self.send(signal_response::Message::RequestResponse(
             lk::RequestResponse {
@@ -1355,22 +1399,9 @@ impl Engine {
             if source == self.wake.from {
                 continue;
             }
-            let media = data.first().is_some_and(|b| *b >= 20);
-            let Ok(contents) = data.try_into() else {
-                continue;
-            };
-            let input = Input::Receive(
-                Instant::now(),
-                Receive {
-                    proto: Protocol::Udp,
-                    source,
-                    destination,
-                    contents,
-                },
-            );
             // str0m in RTP mode holds one received packet until polled:
             // poll before the next datagram, which may be for it too.
-            if let Some((i, side)) = self.route(input, source, false, media)
+            if let Some((i, side)) = self.route(data, source, destination, false)
                 && k + 1 < n
             {
                 self.poll_and_schedule(i, side, Instant::now(), false);
@@ -1386,41 +1417,37 @@ impl Engine {
         let destination = link.local;
         let frames: Vec<_> = link.drain().collect();
         for (source, frame) in frames {
-            let media = frame.first().is_some_and(|b| *b >= 20);
-            let Ok(contents) = frame.as_slice().try_into() else {
-                continue;
-            };
-            let input = Input::Receive(
-                Instant::now(),
-                Receive {
-                    proto: Protocol::Tcp,
-                    source,
-                    destination,
-                    contents,
-                },
-            );
             // str0m in RTP mode holds one received packet until polled:
             // poll after each frame, as the UDP path does per datagram.
-            if let Some((i, side)) = self.route(input, source, true, media) {
+            if let Some((i, side)) = self.route(&frame, source, destination, true) {
                 self.poll_and_schedule(i, side, Instant::now(), false);
             }
         }
     }
 
-    /// Hands input to the transport it belongs to: by its source, once
-    /// known, else whichever accepts it (its STUN credentials).
-    /// Returns the transport it went to.
-    ///
-    /// `media`: DTLS, RTP or RTCP rather than STUN (RFC 7983: STUN starts
-    /// below 20). The path a connection runs over is where those come
-    /// from; ICE checks arrive on every candidate pair.
+    /// Hands a datagram (or TCP frame) to the transport it belongs to: by
+    /// its source, once known, else whichever accepts it (its STUN
+    /// credentials). Returns the transport it went to.
     fn route(
         &mut self,
-        input: Input,
+        data: &[u8],
         source: SocketAddr,
+        destination: SocketAddr,
         tcp: bool,
-        media: bool,
     ) -> Option<(usize, Side)> {
+        // DTLS, RTP or RTCP rather than STUN (RFC 7983: STUN starts below
+        // 20). The path a connection runs over is where those come from;
+        // ICE checks arrive on every candidate pair.
+        let media = data.first().is_some_and(|b| *b >= 20);
+        let contents = data.try_into().ok()?;
+        let proto = if tcp { Protocol::Tcp } else { Protocol::Udp };
+        let receive = Receive {
+            proto,
+            source,
+            destination,
+            contents,
+        };
+        let input = Input::Receive(Instant::now(), receive);
         let routes = if tcp { &self.tcp_routes } else { &self.routes };
         let routed = routes.get(&source).and_then(|&(conn, side)| {
             let i = *self.by_conn.get(&conn)?;
@@ -1999,16 +2026,7 @@ impl Engine {
                 });
             }
             if let Some((offer, pending)) = change.apply() {
-                p.sub_offer_id += 1;
-                let id = p.sub_offer_id;
-                p.send(signal_response::Message::Offer(lk::SessionDescription {
-                    r#type: "offer".into(),
-                    sdp: fallback::filter_sdp(&offer.to_sdp_string(), p.fallback.pref),
-                    id,
-                    ..Default::default()
-                }));
-                p.sub_pending = Some(pending);
-                p.sub_pending_since = Some(now);
+                p.send_sub_offer(offer, pending, HashMap::new(), now);
             }
         }
 
@@ -3049,19 +3067,7 @@ impl Engine {
             );
             return;
         }
-        if !req.name.is_empty() {
-            p.name = req.name;
-        }
-        if !req.metadata.is_empty() {
-            p.metadata = req.metadata;
-        }
-        for (k, v) in req.attributes {
-            if v.is_empty() {
-                p.attributes.remove(&k);
-            } else {
-                p.attributes.insert(k, v);
-            }
-        }
+        p.apply_info(req.name, req.metadata, req.attributes);
         p.version += 1;
         p.reply(req.request_id, request_response::Reason::Ok, "");
         let room = p.room.clone();
@@ -4185,11 +4191,6 @@ impl Engine {
         if matches!(packet.value, Some(data_packet::Value::Metrics(_))) {
             return;
         }
-        let destinations: HashSet<&str> = packet
-            .destination_identities
-            .iter()
-            .map(String::as_str)
-            .collect();
         // Deprecated, but still honoured: destinations by sid.
         let destination_sids: Vec<String> = match &packet.value {
             Some(data_packet::Value::User(u)) => u.destination_sids.clone(),
@@ -4221,19 +4222,34 @@ impl Engine {
                 r.reliable.pop_front();
             }
         }
-        let members = self.rooms[&room].members.clone();
+        let to = (
+            packet.destination_identities.as_slice(),
+            destination_sids.as_slice(),
+        );
+        self.deliver_to_room(&room, Some(i), to, kind, &encoded, origin);
+    }
+
+    /// Delivers a data packet to the room's members but `except`; only to
+    /// those `to` names by identity or sid, when it names any.
+    fn deliver_to_room(
+        &mut self,
+        room: &str,
+        except: Option<usize>,
+        (identities, sids): (&[String], &[String]),
+        kind: data_packet::Kind,
+        encoded: &[u8],
+        origin: Option<(&str, u32)>,
+    ) {
+        let named = !identities.is_empty() || !sids.is_empty();
+        let members = self.rooms[room].members.clone();
         for j in members {
-            if j == i {
-                continue;
-            }
             let o = &self.participants[j];
-            if (!destinations.is_empty() || !destination_sids.is_empty())
-                && !destinations.contains(o.identity.as_str())
-                && !destination_sids.contains(&o.sid)
+            if Some(j) == except
+                || named && !identities.contains(&o.identity) && !sids.contains(&o.sid)
             {
                 continue;
             }
-            self.deliver(j, kind, &encoded, origin);
+            self.deliver(j, kind, encoded, origin);
         }
     }
 
@@ -4943,16 +4959,7 @@ fn negotiate_dual(p: &mut Participant) {
         }
     }
     p.restart_ice = false;
-    p.sub_offer_id += 1;
-    let id = p.sub_offer_id;
-    p.send(signal_response::Message::Offer(lk::SessionDescription {
-        r#type: "offer".into(),
-        sdp: fallback::filter_sdp(&offer.to_sdp_string(), p.fallback.pref),
-        id,
-        mid_to_track_id,
-    }));
-    p.sub_pending = Some(pending);
-    p.sub_pending_since = Some(Instant::now());
+    p.send_sub_offer(offer, pending, mid_to_track_id, Instant::now());
 }
 
 /// Records a layer's picture size; the track's own for the top layer.

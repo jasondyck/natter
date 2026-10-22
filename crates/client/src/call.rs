@@ -409,14 +409,6 @@ impl Inner {
         let id = self.offer_id.get() + 1;
         self.offer_id.set(id);
         let join = lk::JoinRequest {
-            client_info: Some(lk::ClientInfo {
-                protocol: PROTOCOL,
-                ..Default::default()
-            }),
-            connection_settings: Some(lk::ConnectionSettings {
-                auto_subscribe: true,
-                ..Default::default()
-            }),
             reconnect: true,
             participant_sid: sid,
             publisher_offer: Some(lk::SessionDescription {
@@ -425,7 +417,7 @@ impl Inner {
                 id,
                 ..Default::default()
             }),
-            ..Default::default()
+            ..join_request()
         };
         let ws = WebSocket::new(&ws_url(&self.token.borrow(), &join)?).map_err(js_err)?;
         ws.set_binary_type(BinaryType::Arraybuffer);
@@ -741,14 +733,6 @@ async fn offer(
             .filter_map(|(t, cid)| t.mid().map(|m| (m, cid.clone())))
             .collect();
         Ok(lk::JoinRequest {
-            client_info: Some(lk::ClientInfo {
-                protocol: PROTOCOL,
-                ..Default::default()
-            }),
-            connection_settings: Some(lk::ConnectionSettings {
-                auto_subscribe: true,
-                ..Default::default()
-            }),
             add_track_requests: add_tracks,
             publisher_offer: Some(lk::SessionDescription {
                 r#type: "offer".into(),
@@ -756,7 +740,7 @@ async fn offer(
                 id: 1,
                 mid_to_track_id,
             }),
-            ..Default::default()
+            ..join_request()
         })
     }
     .await;
@@ -827,6 +811,22 @@ fn prefer_red(transceiver: &RtcRtpTransceiver) {
 fn stop_tracks(stream: &MediaStream) {
     for track in stream.get_tracks() {
         track.unchecked_into::<MediaStreamTrack>().stop();
+    }
+}
+
+/// What every join and rejoin asks for: this client's protocol, and
+/// subscribing to everything published.
+fn join_request() -> lk::JoinRequest {
+    lk::JoinRequest {
+        client_info: Some(lk::ClientInfo {
+            protocol: PROTOCOL,
+            ..Default::default()
+        }),
+        connection_settings: Some(lk::ConnectionSettings {
+            auto_subscribe: true,
+            ..Default::default()
+        }),
+        ..Default::default()
     }
 }
 

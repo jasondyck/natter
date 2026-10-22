@@ -99,13 +99,7 @@ impl Store {
     /// Every account, oldest first.
     pub fn users(&self) -> Result<Vec<User>> {
         let tx = self.db.begin_read()?;
-        let mut users = tx
-            .open_table(USERS)?
-            .iter()?
-            .map(|row| decode::<User>(row?.1.value()))
-            .collect::<Result<Vec<_>>>()?;
-        users.sort_by_key(|u| u.created_at);
-        Ok(users)
+        sorted_users(&tx.open_table(USERS)?)
     }
 
     pub fn user(&self, id: Uuid) -> Result<Option<User>> {
@@ -331,16 +325,21 @@ impl Store {
     }
 }
 
-/// Recomputes `NAMES` from `USERS`, so changes to [`name_keys`] apply to
-/// existing accounts. Where two accounts now share a key, the older keeps
-/// the name and the newer can no longer sign in by it.
-fn rebuild_names(tx: &redb::WriteTransaction) -> Result<()> {
-    let mut users = tx
-        .open_table(USERS)?
+/// Every account in `USERS`, oldest first.
+fn sorted_users(table: &impl ReadableTable<&'static str, &'static [u8]>) -> Result<Vec<User>> {
+    let mut users = table
         .iter()?
         .map(|row| decode::<User>(row?.1.value()))
         .collect::<Result<Vec<_>>>()?;
     users.sort_by_key(|u| u.created_at);
+    Ok(users)
+}
+
+/// Recomputes `NAMES` from `USERS`, so changes to [`name_keys`] apply to
+/// existing accounts. Where two accounts now share a key, the older keeps
+/// the name and the newer can no longer sign in by it.
+fn rebuild_names(tx: &redb::WriteTransaction) -> Result<()> {
+    let users = sorted_users(&tx.open_table(USERS)?)?;
 
     tx.delete_table(NAMES)?;
     let mut names = tx.open_table(NAMES)?;

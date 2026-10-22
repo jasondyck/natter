@@ -118,6 +118,29 @@ struct Link {
     queue: VecDeque<(Instant, SocketAddr, Vec<u8>)>,
 }
 
+/// Hands a datagram from the server to a connection's `Rtc`.
+fn feed(
+    rtc: &mut Rtc,
+    id: ConnId,
+    now: Instant,
+    source: SocketAddr,
+    destination: SocketAddr,
+    data: &[u8],
+) {
+    let Ok(contents) = data.try_into() else {
+        return;
+    };
+    let receive = Receive {
+        proto: Protocol::Udp,
+        source,
+        destination,
+        contents,
+    };
+    if let Err(e) = rtc.handle_input(Input::Receive(now, receive)) {
+        debug!("conn {id}: bad input: {e:?}");
+    }
+}
+
 /// Which client a connection belongs to, for the readiness check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClientKey {
@@ -678,21 +701,14 @@ impl Loop {
                 link.queue.push_back((arrival, source, buf[..n].to_vec()));
                 continue;
             }
-            let Ok(contents) = buf[..n].try_into() else {
-                continue;
-            };
-            let input = Input::Receive(
+            feed(
+                &mut conn.rtc,
+                id,
                 Instant::now(),
-                Receive {
-                    proto: Protocol::Udp,
-                    source,
-                    destination,
-                    contents,
-                },
+                source,
+                destination,
+                &buf[..n],
             );
-            if let Err(e) = conn.rtc.handle_input(input) {
-                debug!("conn {id}: bad input: {e:?}");
-            }
         }
         self.touched.insert(id);
     }
@@ -708,28 +724,13 @@ impl Loop {
         let Some(link) = &mut conn.link else {
             return;
         };
-        while let Some((at, source, data)) = link.queue.front() {
+        while let Some((at, ..)) = link.queue.front() {
             if *at > now {
                 self.releases.push(Reverse((*at, id)));
                 break;
             }
-            let (source, data) = (*source, data.clone());
-            link.queue.pop_front();
-            let Ok(contents) = data.as_slice().try_into() else {
-                continue;
-            };
-            let input = Input::Receive(
-                now,
-                Receive {
-                    proto: Protocol::Udp,
-                    source,
-                    destination,
-                    contents,
-                },
-            );
-            if let Err(e) = conn.rtc.handle_input(input) {
-                debug!("conn {id}: bad input: {e:?}");
-            }
+            let (_, source, data) = link.queue.pop_front().expect("peeked");
+            feed(&mut conn.rtc, id, now, source, destination, &data);
         }
         self.touched.insert(id);
     }

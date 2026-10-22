@@ -205,50 +205,31 @@ pub async fn rtc(
     headers: HeaderMap,
     uri: axum::http::Uri,
 ) -> Response {
-    // Join latency counts from here, before the token is checked, as
-    // LiveKit's (`rtcservice.go` `serve`).
-    let started = std::time::Instant::now();
-    let verified = match verify(&headers, &query, &state) {
-        Ok(v) => v,
-        Err((code, msg)) => return (code, msg).into_response(),
-    };
-    let resume = query
-        .get("reconnect")
-        .is_some_and(|v| v == "1" || v == "true");
-    match route(&state, &headers, &verified, resume, true).await {
-        Ok(None) => {}
-        Ok(Some(node)) => {
-            let cluster = state.cluster.clone().expect("routed by the cluster");
-            return relay_to(upgrade, cluster, node, &uri, headers);
-        }
-        Err(r) => return r,
-    }
-    let flag = |k: &str, default: bool| {
-        query
-            .get(k)
-            .map_or(default, |v| matches!(v.as_str(), "1" | "true"))
-    };
-    let opts = Opts {
-        auto_subscribe: flag("auto_subscribe", true),
-        auto_subscribe_data: flag("auto_subscribe_data_track", false),
-        adaptive_stream: flag("adaptive_stream", false),
-        allow_pause: query
-            .get("subscriber_allow_pause")
-            .map(|v| matches!(v.as_str(), "1" | "true")),
-        resume: flag("reconnect", false).then(|| query.get("sid").cloned().unwrap_or_default()),
-        client: client_info(&query),
-        reason: query
-            .get("reconnect_reason")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0),
-        ice_tcp: query.get("sdk").is_none_or(|s| s != "go"),
-        join: None,
-        started,
-    };
-    upgrade
-        .max_message_size(MAX_MESSAGE)
-        .max_frame_size(MAX_MESSAGE)
-        .on_upgrade(move |ws| session(ws, state, verified, opts))
+    serve(upgrade, state, query, headers, uri, |query, started| {
+        let flag = |k: &str, default: bool| {
+            query
+                .get(k)
+                .map_or(default, |v| matches!(v.as_str(), "1" | "true"))
+        };
+        Ok(Opts {
+            auto_subscribe: flag("auto_subscribe", true),
+            auto_subscribe_data: flag("auto_subscribe_data_track", false),
+            adaptive_stream: flag("adaptive_stream", false),
+            allow_pause: query
+                .get("subscriber_allow_pause")
+                .map(|v| matches!(v.as_str(), "1" | "true")),
+            resume: flag("reconnect", false).then(|| query.get("sid").cloned().unwrap_or_default()),
+            client: client_info(query),
+            reason: query
+                .get("reconnect_reason")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            ice_tcp: query.get("sdk").is_none_or(|s| s != "go"),
+            join: None,
+            started,
+        })
+    })
+    .await
 }
 
 /// `/rtc/v1`: single peer connection. Everything `/rtc` takes as query
@@ -262,6 +243,49 @@ pub async fn rtc_v1(
     headers: HeaderMap,
     uri: axum::http::Uri,
 ) -> Response {
+    serve(upgrade, state, query, headers, uri, |query, started| {
+        let join = match query.get("join_request").map(|j| join_request(j)) {
+            Some(Ok(j)) => j,
+            Some(Err(e)) => return Err((StatusCode::BAD_REQUEST, e.to_string())),
+            None => return Err((StatusCode::BAD_REQUEST, "join_request missing".into())),
+        };
+        let settings = join.connection_settings.unwrap_or(lk::ConnectionSettings {
+            auto_subscribe: true,
+            ..Default::default()
+        });
+        Ok(Opts {
+            auto_subscribe: settings.auto_subscribe,
+            auto_subscribe_data: settings.auto_subscribe_data_track.unwrap_or(false),
+            adaptive_stream: settings.adaptive_stream,
+            allow_pause: settings.subscriber_allow_pause,
+            resume: join.reconnect.then(|| join.participant_sid.clone()),
+            client: join.client_info.clone().unwrap_or_default(),
+            reason: join.reconnect_reason,
+            ice_tcp: join
+                .client_info
+                .as_ref()
+                .is_none_or(|c| c.sdk() != lk::client_info::Sdk::Go),
+            join: Some(join),
+            started,
+        })
+    })
+    .await
+}
+
+/// What `/rtc` and `/rtc/v1` share: checks the token, reads the session's
+/// options (`opts`, or why they are refused), and hands the
+/// WebSocket to the room's node or starts the session here.
+async fn serve(
+    upgrade: WebSocketUpgrade,
+    state: RtcState,
+    query: HashMap<String, String>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    opts: impl FnOnce(
+        &HashMap<String, String>,
+        std::time::Instant,
+    ) -> Result<Opts, (StatusCode, String)>,
+) -> Response {
     // Join latency counts from here, before the token is checked, as
     // LiveKit's (`rtcservice.go` `serve`).
     let started = std::time::Instant::now();
@@ -269,12 +293,11 @@ pub async fn rtc_v1(
         Ok(v) => v,
         Err((code, msg)) => return (code, msg).into_response(),
     };
-    let join = match query.get("join_request").map(|j| join_request(j)) {
-        Some(Ok(j)) => j,
-        Some(Err(e)) => return (StatusCode::BAD_REQUEST, e).into_response(),
-        None => return (StatusCode::BAD_REQUEST, "join_request missing").into_response(),
+    let opts = match opts(&query, started) {
+        Ok(o) => o,
+        Err(refused) => return refused.into_response(),
     };
-    match route(&state, &headers, &verified, join.reconnect, true).await {
+    match route(&state, &headers, &verified, opts.resume.is_some(), true).await {
         Ok(None) => {}
         Ok(Some(node)) => {
             let cluster = state.cluster.clone().expect("routed by the cluster");
@@ -282,25 +305,6 @@ pub async fn rtc_v1(
         }
         Err(r) => return r,
     }
-    let settings = join.connection_settings.unwrap_or(lk::ConnectionSettings {
-        auto_subscribe: true,
-        ..Default::default()
-    });
-    let opts = Opts {
-        auto_subscribe: settings.auto_subscribe,
-        auto_subscribe_data: settings.auto_subscribe_data_track.unwrap_or(false),
-        adaptive_stream: settings.adaptive_stream,
-        allow_pause: settings.subscriber_allow_pause,
-        resume: join.reconnect.then(|| join.participant_sid.clone()),
-        client: join.client_info.clone().unwrap_or_default(),
-        reason: join.reconnect_reason,
-        ice_tcp: join
-            .client_info
-            .as_ref()
-            .is_none_or(|c| c.sdk() != lk::client_info::Sdk::Go),
-        join: Some(join),
-        started,
-    };
     upgrade
         .max_message_size(MAX_MESSAGE)
         .max_frame_size(MAX_MESSAGE)

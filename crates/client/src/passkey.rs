@@ -33,15 +33,13 @@ pub async fn create(options: &Value) -> Result<Value, String> {
     .map_err(cancelled)?;
 
     let response = prop(&cred, "response")?;
-    Ok(json!({
-        "id": prop(&cred, "id")?.as_string(),
-        "rawId": encode(&prop(&cred, "rawId")?),
-        "type": "public-key",
-        "response": {
+    envelope(
+        &cred,
+        json!({
             "attestationObject": encode(&prop(&response, "attestationObject")?),
             "clientDataJSON": encode(&prop(&response, "clientDataJSON")?),
-        },
-    }))
+        }),
+    )
 }
 
 /// Signs a login challenge with an existing passkey.
@@ -62,17 +60,25 @@ pub async fn get(options: &Value) -> Result<Value, String> {
 
     let response = prop(&cred, "response")?;
     let user_handle = prop(&response, "userHandle")?;
-    Ok(json!({
-        "id": prop(&cred, "id")?.as_string(),
-        "rawId": encode(&prop(&cred, "rawId")?),
-        "type": "public-key",
-        "response": {
+    envelope(
+        &cred,
+        json!({
             "authenticatorData": encode(&prop(&response, "authenticatorData")?),
             "clientDataJSON": encode(&prop(&response, "clientDataJSON")?),
             "signature": encode(&prop(&response, "signature")?),
             "userHandle": (!user_handle.is_null() && !user_handle.is_undefined())
                 .then(|| encode(&user_handle)),
-        },
+        }),
+    )
+}
+
+/// A credential as webauthn-rs reads it, around its `response` fields.
+fn envelope(cred: &JsValue, response: Value) -> Result<Value, String> {
+    Ok(json!({
+        "id": prop(cred, "id")?.as_string(),
+        "rawId": encode(&prop(cred, "rawId")?),
+        "type": "public-key",
+        "response": response,
     }))
 }
 
