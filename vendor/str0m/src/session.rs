@@ -135,6 +135,13 @@ pub(crate) struct Session {
     feedback_tx: VecDeque<Rtcp>,
     feedback_rx: VecDeque<Rtcp>,
     rtp_closing: bool,
+    /// natter: the soonest deadline from the last `poll_timeout` other than
+    /// the pacer's and unstamped writes' (`handle_send_timeout`).
+    non_send_at: Option<Instant>,
+    /// natter: `poll_event`'s "the estimator can probe", as of the last
+    /// full timeout: working it out walks every m-line's extensions and
+    /// codecs, and `poll_event` runs on every `poll_output`.
+    can_probe: bool,
 
     /// Pending RRTRs from remote SSRCs in FIFO order, deduplicated by SSRC.
     /// A new RRTR for an already-pending SSRC updates its value in place.
@@ -235,6 +242,8 @@ impl Session {
             feedback_tx: VecDeque::new(),
             feedback_rx: VecDeque::new(),
             rtp_closing: false,
+            non_send_at: None,
+            can_probe: false,
             pending_rrtrs: VecDeque::new(),
             twcc_feedback: config.twcc_feedback_events.then(VecDeque::new),
             raw_packets: if config.enable_raw_packets {
@@ -299,6 +308,9 @@ impl Session {
         if self.rtp_closing {
             return Ok(());
         }
+
+        self.can_probe =
+            self.bwe.is_some() && self.srtp_tx.is_some() && self.probe_media().is_some();
 
         // Payload ready media.
         self.do_payload(now)?;
@@ -1023,8 +1035,7 @@ impl Session {
             }
         }
 
-        let can_probe =
-            self.bwe.is_some() && self.srtp_tx.is_some() && self.probe_media().is_some();
+        let can_probe = self.can_probe;
         if let Some(bwe) = &mut self.bwe {
             // Drain estimates even while unavailable so they cannot be delivered later.
             let estimate = bwe.poll_estimate();
@@ -1336,15 +1347,61 @@ impl Session {
             // We should never see this reason.
             .unwrap_or((None, Reason::BweDelayControl));
 
-        (feedback_at, Reason::Feedback)
+        let other = (feedback_at, Reason::Feedback)
             .soonest((nack_at, Reason::Nack))
             .soonest((twcc_at, Reason::Twcc))
-            .soonest(pacing_at)
             .soonest((receive_at, Reason::ReceiveReorder))
             .soonest((packetize_at, Reason::Packetize))
             .soonest((paused_at, Reason::PauseCheck))
+            .soonest(bwe_at);
+        self.non_send_at = other.0;
+        other
+            .soonest(pacing_at)
             .soonest((send_stream_at, Reason::SendStream))
-            .soonest(bwe_at)
+    }
+
+    /// natter: the pacer or unstamped writes want a timeout by `now`.
+    pub fn send_due(&self, now: Instant) -> bool {
+        self.pacer.poll_timeout().0.is_some_and(|at| at <= now) || self.streams.send_stream().is_some()
+    }
+
+    /// natter: the soonest of `poll_timeout`'s deadlines other than
+    /// sending's, as of its last call.
+    pub fn non_send_at(&self) -> Option<Instant> {
+        self.non_send_at
+    }
+
+    /// natter: `handle_timeout`'s sending part alone, when nothing else is
+    /// due at `now`: timestamps writes and updates the pacer. An SFU feeds
+    /// a timeout per forwarded packet only to release it, and the rest of
+    /// `handle_timeout` (every stream's reports, NACK, TWCC, the estimator)
+    /// had nothing to do but cost as much again. False, having done
+    /// nothing: call `handle_timeout` (a probe is running, a keyframe or
+    /// REMB request waits, or a check of the estimator is due).
+    pub fn handle_send_timeout(&mut self, now: Instant) -> bool {
+        if self.rtp_closing
+            || self.non_send_at.is_some_and(|at| now >= at)
+            || self.pacer.active_cluster().is_some()
+            || self.streams.rx_requests_pending()
+        {
+            return false;
+        }
+        let capable = match self.bwe_capable {
+            Some((capable, at)) if capable || now.saturating_duration_since(at) < BWE_RECHECK => {
+                capable
+            }
+            _ => return false,
+        };
+        if !self.streams.stamp_send_queues(now) {
+            return false;
+        }
+        if capable {
+            // No probe: what `handle_timeout_bwe` would hand on is unused.
+            self.update_queue_state(now, None);
+        } else {
+            self.update_queue_state_plain(now);
+        }
+        true
     }
 
     pub fn has_mid(&self, mid: Mid) -> bool {

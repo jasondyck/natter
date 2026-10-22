@@ -328,6 +328,9 @@ struct Transport {
     deadline: Instant,
     /// Handed input since last polled.
     dirty: bool,
+    /// Written packets to send since last polled: str0m's clock is brought
+    /// up to now first, which releases them without a full timeout.
+    wrote: bool,
     connected: bool,
     /// When ICE last connected, since the last (re)start: how long-lived
     /// the connection was if it fails.
@@ -345,6 +348,7 @@ impl Transport {
             rtc,
             deadline: Instant::now(),
             dirty: true,
+            wrote: false,
             connected: false,
             connected_at: None,
             last_from: None,
@@ -1471,10 +1475,13 @@ impl Engine {
         // Single-PC: the subscriber side is the publisher PC, polled as such.
         let side = if p.single_pc() { Side::Publisher } else { side };
         let t = p.transport(side);
-        if t.deadline <= now {
+        if t.deadline <= now || t.wrote {
             t.dirty = true;
+            t.wrote = false;
             if t.rtc.is_alive() {
-                let _ = t.rtc.handle_input(Input::Timeout(now));
+                // Mostly due only to release written packets: str0m then
+                // skips the rest of its timeout handling.
+                let _ = t.rtc.handle_send_timeout(now);
             }
         }
         if !t.dirty {
@@ -1510,7 +1517,7 @@ impl Engine {
                 // next pass left them for the socket's read timeout, 1 ms+).
                 Ok(Output::Timeout(at)) if !fed && at <= Instant::now() => {
                     fed = true;
-                    let _ = t.rtc.handle_input(Input::Timeout(Instant::now()));
+                    let _ = t.rtc.handle_send_timeout(Instant::now());
                 }
                 Ok(Output::Timeout(at)) => {
                     t.deadline = at.min(now + CHECK_INTERVAL);
@@ -3619,7 +3626,9 @@ impl Engine {
     /// to send; `first` names the track on its first packet.
     #[inline]
     fn forwarded(&mut self, j: usize, packets: u64, bytes: u64, first: Option<&str>) {
-        sub!(self.participants[j]).dirty = true;
+        let t = sub!(self.participants[j]);
+        t.dirty = true;
+        t.wrote = true;
         self.touched.push((j, Side::Subscriber));
         self.metrics
             .packets_forwarded_total

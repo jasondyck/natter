@@ -237,6 +237,11 @@ impl StreamRx {
         self.last_time
     }
 
+    /// natter: a keyframe or REMB request waits for the next timeout.
+    pub(crate) fn has_pending_request(&self) -> bool {
+        self.pending_request_keyframe.is_some() || self.pending_request_remb.is_some()
+    }
+
     /// Request a keyframe for an incoming encoded stream.
     ///
     /// * SSRC the identifier of the remote encoded stream to request a keyframe for.

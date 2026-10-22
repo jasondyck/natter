@@ -774,6 +774,24 @@ impl Streams {
             .find(|s| s.ssrc() == ssrc || s.rtx() == Some(ssrc))
     }
 
+    /// natter: whether a receive stream has a request for the next timeout.
+    pub(crate) fn rx_requests_pending(&self) -> bool {
+        self.streams_rx.values().any(|s| s.has_pending_request())
+    }
+
+    /// natter: the send streams' part of `handle_timeout`: timestamps what
+    /// was written since. False, touching nothing, if a stream has never
+    /// had a timeout (its first sets it up).
+    pub(crate) fn stamp_send_queues(&mut self, now: Instant) -> bool {
+        if self.streams_tx.values().any(|s| !s.has_had_timeout()) {
+            return false;
+        }
+        for stream in self.streams_tx.values_mut() {
+            stream.stamp_send_queue(now);
+        }
+        true
+    }
+
     pub(crate) fn any_nack_enabled(&mut self) -> bool {
         if self.any_nack_active.is_none() {
             self.any_nack_active = Some(self.streams_rx.values().any(|s| s.nack_enabled()));
