@@ -46,21 +46,63 @@ pub fn flush(w: &mut impl Write, queue: &mut VecDeque<u8>) -> Result<bool, ()> {
 
 /// Datagrams an engine sends during one pass, flushed with one
 /// `sendmmsg(2)` per [`SendBatch::MAX`] instead of a syscall each: a
-/// packet in is often several out (one per subscriber).
-#[derive(Default)]
+/// packet in is often several out (one per subscriber). Runs of datagrams
+/// to one address, all one size but the last, go as one UDP GSO message
+/// (`UDP_SEGMENT`): the stack (routing, netfilter, IP) runs once for the
+/// run and the datagrams are cut at the end, as for a video frame's
+/// packets to a subscriber.
 pub struct SendBatch {
     queue: Vec<(SockAddr, Vec<u8>)>,
+    /// Off for good once the kernel refuses a GSO message (no UDP GSO, or
+    /// a device without checksum offload).
+    gso: bool,
 }
+
+impl Default for SendBatch {
+    fn default() -> Self {
+        SendBatch {
+            queue: vec![],
+            gso: true,
+        }
+    }
+}
+
+/// A control message's room, aligned as `cmsghdr`.
+#[repr(C, align(8))]
+#[derive(Clone, Copy)]
+struct Cmsg([u8; 32]);
 
 impl SendBatch {
     /// Datagrams per `sendmmsg` (chosen: the kernel's UIO_MAXIOV is 1024;
     /// past a few dozen the syscall's fixed cost is already spread thin).
     pub const MAX: usize = 64;
+    /// A GSO message's payload limit: an IP datagram's, less headers.
+    const GSO_BYTES: usize = 65_000;
 
     /// Queues a datagram. True: the batch is full, flush it.
     pub fn push(&mut self, to: SocketAddr, data: Vec<u8>) -> bool {
         self.queue.push((SockAddr::from(to), data));
         self.queue.len() >= Self::MAX
+    }
+
+    /// How many datagrams from the start of `rest` go as one message: a
+    /// run to one address, each the first's size but a shorter last.
+    fn run_len(rest: &[(SockAddr, Vec<u8>)]) -> usize {
+        let (to, first) = &rest[0];
+        let size = first.len();
+        let mut n = 1;
+        let mut bytes = size;
+        while let Some((t, d)) = rest.get(n) {
+            if t != to || d.len() > size || d.is_empty() || bytes + d.len() > Self::GSO_BYTES {
+                break;
+            }
+            n += 1;
+            bytes += d.len();
+            if d.len() < size {
+                break;
+            }
+        }
+        n
     }
 
     /// Sends what is queued. Returns how many datagrams failed (each
@@ -70,44 +112,81 @@ impl SendBatch {
         let mut at = 0;
         while at < self.queue.len() {
             let chunk = &self.queue[at..(at + Self::MAX).min(self.queue.len())];
-            // SAFETY: all-zero iovec and mmsghdr are valid (null pointers,
-            // zero lengths); every one used is filled in below.
+            // SAFETY: all-zero iovec, mmsghdr and control bytes are valid
+            // (null pointers, zero lengths); every one used is filled in.
             let mut iov: [libc::iovec; Self::MAX] = unsafe { std::mem::zeroed() };
             let mut msgs: [libc::mmsghdr; Self::MAX] = unsafe { std::mem::zeroed() };
-            for (k, (to, data)) in chunk.iter().enumerate() {
-                iov[k] = libc::iovec {
-                    iov_base: data.as_ptr() as *mut libc::c_void,
-                    iov_len: data.len(),
+            let mut cmsgs = [Cmsg([0; 32]); Self::MAX];
+            // How many datagrams each message carries.
+            let mut carries = [0usize; Self::MAX];
+            let (mut k, mut m) = (0, 0);
+            while k < chunk.len() {
+                let n = if self.gso {
+                    Self::run_len(&chunk[k..])
+                } else {
+                    1
                 };
-                let h = &mut msgs[k].msg_hdr;
+                for (j, (_, data)) in chunk[k..k + n].iter().enumerate() {
+                    iov[k + j] = libc::iovec {
+                        iov_base: data.as_ptr() as *mut libc::c_void,
+                        iov_len: data.len(),
+                    };
+                }
+                let to = &chunk[k].0;
+                let h = &mut msgs[m].msg_hdr;
                 h.msg_name = to.as_ptr() as *mut libc::c_void;
                 h.msg_namelen = to.len();
                 h.msg_iov = &mut iov[k];
-                h.msg_iovlen = 1;
+                h.msg_iovlen = n;
+                if n > 1 {
+                    let c = cmsgs[m].0.as_mut_ptr() as *mut libc::cmsghdr;
+                    // SAFETY: `cmsgs[m]` is aligned for and larger than a
+                    // cmsghdr with two bytes of data (CMSG_SPACE(2) = 24).
+                    unsafe {
+                        (*c).cmsg_level = libc::SOL_UDP;
+                        (*c).cmsg_type = libc::UDP_SEGMENT;
+                        (*c).cmsg_len = libc::CMSG_LEN(2) as _;
+                        std::ptr::write_unaligned(
+                            libc::CMSG_DATA(c) as *mut u16,
+                            chunk[k].1.len() as u16,
+                        );
+                        h.msg_controllen = libc::CMSG_SPACE(2) as _;
+                    }
+                    h.msg_control = c as *mut libc::c_void;
+                }
+                carries[m] = n;
+                k += n;
+                m += 1;
             }
-            // SAFETY: the headers point into `iov` and `chunk`, which
-            // outlive the call; the count is at most their length.
-            let n = unsafe {
-                libc::sendmmsg(
-                    socket.as_raw_fd(),
-                    msgs.as_mut_ptr(),
-                    chunk.len() as libc::c_uint,
-                    0,
-                )
+            // SAFETY: the headers point into `iov`, `cmsgs` and `chunk`,
+            // which outlive the call; `m` is at most their length.
+            let sent = unsafe {
+                libc::sendmmsg(socket.as_raw_fd(), msgs.as_mut_ptr(), m as libc::c_uint, 0)
             };
-            if n > 0 {
-                at += n as usize;
+            if sent > 0 {
+                at += carries[..sent as usize].iter().sum::<usize>();
                 continue;
             }
             let e = std::io::Error::last_os_error();
             if e.kind() == ErrorKind::Interrupted {
                 continue;
             }
-            // The first datagram failed: drop it, as send_to would, and
-            // go on with the rest.
+            if carries[0] > 1
+                && matches!(
+                    e.raw_os_error(),
+                    Some(libc::EIO | libc::EINVAL | libc::EOPNOTSUPP | libc::ENOPROTOOPT)
+                )
+            {
+                // Try that run again one datagram at a time.
+                tracing::warn!("UDP GSO refused ({e}); sending datagrams singly");
+                self.gso = false;
+                continue;
+            }
+            // The first message failed: drop its datagrams, as send_to
+            // would, and go on with the rest.
             tracing::debug!("UDP send failed: {e}");
-            failed += 1;
-            at += 1;
+            failed += carries[0] as u64;
+            at += carries[0];
         }
         self.queue.clear();
         failed
@@ -239,6 +318,33 @@ mod tests {
             assert_eq!(&buf[..len], (k as u32).to_be_bytes());
         }
         assert!(batch.queue.is_empty());
+    }
+
+    /// Runs to one address go as GSO messages, and arrive as the
+    /// datagrams they were, in order.
+    #[test]
+    fn sends_runs_as_gso() {
+        let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let to = rx.local_addr().unwrap();
+        let mut batch = SendBatch::default();
+        // Four of 1000 bytes and a shorter last: one message; then two
+        // more of a new size; then one of a larger size.
+        let sizes = [1000, 1000, 1000, 1000, 300, 500, 500, 900];
+        for (k, &n) in sizes.iter().enumerate() {
+            batch.push(to, vec![k as u8; n]);
+        }
+        assert_eq!(SendBatch::run_len(&batch.queue), 5);
+        assert_eq!(SendBatch::run_len(&batch.queue[5..]), 2);
+        assert_eq!(batch.flush(&tx), 0);
+        assert!(batch.gso, "GSO refused on loopback");
+        let mut buf = [0u8; 2000];
+        for (k, &n) in sizes.iter().enumerate() {
+            let len = rx.recv(&mut buf).unwrap();
+            assert_eq!(len, n);
+            assert!(buf[..len].iter().all(|&b| b == k as u8));
+        }
     }
 
     /// Whatever is queued comes in one call, with its senders; then a
