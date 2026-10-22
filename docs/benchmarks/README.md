@@ -231,6 +231,27 @@ against ~5, and keyframes four times that; LiveKit's p99 rises the same
 way in the runs where it tries `h`. Raw results in
 [`data/2026-10-22/congestion/same-video`](data/2026-10-22/congestion/same-video).
 
+**With audio on the same link.** One more participant per room sending
+audio (`--audio-publishers 1`), so each subscriber's 1 Mbit/s carries its
+audio too; five interleaved runs each:
+
+| 1 Mbit/s, 150 ms | audio p50 | audio p99 | audio lost | video lost |
+|---|---|---|---|---|
+| natter | 172–177 ms | 186–203 ms | 0 | 0 |
+| natter, subscribers ask for `q` | 171–173 ms | 184–190 ms | 0 | 0 |
+| LiveKit | 173–640 ms | 201 ms once, else 802–871 ms | 0 once, else 3.2–15.6% | 0 once, else 17–66% |
+
+natter's upgrades to `h` cost its audio ~10 ms at p99. LiveKit overloaded
+the link in four runs of five (14,000–175,000 packets dropped by the
+bottleneck's queue, against ~4,000 without the audio participant):
+counting what reached the bottleneck in one such run, it sent more video
+resends (RTX, ~1100 bytes) than original video packets, on the `h` and `f`
+layers rather than `q`, and the audio queued and was dropped behind them.
+Why the audio participant sets this off isn't pinned down, nor whether
+`natter-load`'s receiver (str0m's NACKs, not Chrome's) plays a part.
+Raw results in
+[`data/2026-10-22/congestion/with-audio`](data/2026-10-22/congestion/with-audio).
+
 **How it works** (`crates/server/src/livekit/allocator.rs`):
 
 1. The estimate is str0m's GCC on the client's TWCC feedback. Layers are

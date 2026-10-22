@@ -116,7 +116,7 @@ pub async fn join(ctx: Arc<Ctx>, keys: Keys, client: Client) -> anyhow::Result<(
     }
     if session.client.publisher.is_some() {
         session.cid = format!("TR_load{}", session.client.identity);
-        let add = match session.ctx.kind {
+        let add = match session.client.kind {
             MediaKind::Audio => lk::AddTrackRequest {
                 cid: session.cid.clone(),
                 name: "audio".into(),
@@ -284,7 +284,7 @@ impl Session {
         let socket = media::bind(self.ctx.bind)?;
         let mut rtc = media::client_rtc(socket.local_addr()?);
         let mut api = rtc.sdp_api();
-        let kind = self.ctx.kind;
+        let kind = self.client.kind;
         let simulcast = kind == MediaKind::Video && self.ctx.simulcast;
         let layers = simulcast.then(|| {
             let mut s = Simulcast::new();

@@ -462,7 +462,8 @@ loss and latency are then per frame, and subscribers also count frames a
 decoder couldn't show (after a loss, until a keyframe), asking for
 keyframes as a browser would. With `--simulcast` publishers send three
 layers, and `--sub-quality q|h|f` has subscribers ask for no more than
-one (by size, as the SDKs' adaptive stream).
+one (by size, as the SDKs' adaptive stream); `--audio-publishers N` adds
+N participants per room sending audio alongside the video, reported apart.
 
 `bench/compare.sh` runs it against each server in turn, each started
 fresh, so they are compared within one session (results drift by up to a

@@ -22,13 +22,13 @@ pub struct Client {
     pub identity: String,
     /// Publisher id stamped into its packets, if it publishes.
     pub publisher: Option<u32>,
+    /// What it publishes.
+    pub kind: MediaKind,
 }
 
 pub struct Ctx {
     pub url: String,
     pub bind: IpAddr,
-    /// What publishers publish.
-    pub kind: MediaKind,
     /// Video: three simulcast layers, the top one at `video_bps`.
     pub simulcast: bool,
     pub video_bps: u32,
@@ -43,7 +43,6 @@ impl Ctx {
     pub fn new(
         url: String,
         bind: IpAddr,
-        kind: MediaKind,
         simulcast: bool,
         video_bps: u32,
         sub_quality: Option<u8>,
@@ -52,7 +51,6 @@ impl Ctx {
         Arc::new(Ctx {
             url: url.trim_end_matches('/').to_owned(),
             bind,
-            kind,
             simulcast,
             video_bps,
             sub_quality,
