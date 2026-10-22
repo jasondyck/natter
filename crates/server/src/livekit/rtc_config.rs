@@ -290,7 +290,7 @@ pub fn opus_params(media: MediaConfig) -> PayloadParams {
     serde_json::from_value(value).expect("PayloadParams deserialises")
 }
 
-/// Who does the DTLS handshake's crypto (`NATTER_DTLS_CRYPTO`).
+/// Who does the DTLS handshake's crypto, and SRTP's (`NATTER_DTLS_CRYPTO`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DtlsCrypto {
     /// RustCrypto, with P-256 signatures on p256 0.14 (`dtls_crypto`).
@@ -332,7 +332,17 @@ impl std::fmt::Display for DtlsCrypto {
 pub fn install_crypto(dtls: DtlsCrypto) {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        str0m::crypto::from_feature_flags().install_process_default();
+        #[allow(unused_mut)]
+        let mut provider = str0m::crypto::from_feature_flags();
+        // Per packet, SRTP is the larger cost: aws-lc's AES-GCM is a
+        // fraction of RustCrypto's (GHASH alone was ~10% of forwarding).
+        #[cfg(feature = "aws-lc")]
+        if dtls == DtlsCrypto::AwsLc {
+            static SRTP: super::srtp_aws_lc::AwsLcRsSrtpProvider =
+                super::srtp_aws_lc::AwsLcRsSrtpProvider;
+            provider.srtp_provider = &SRTP;
+        }
+        provider.install_process_default();
         dimpl::crypto::CryptoProvider::install_default(match dtls {
             DtlsCrypto::Rust => super::dtls_crypto::provider(),
             #[cfg(feature = "aws-lc")]

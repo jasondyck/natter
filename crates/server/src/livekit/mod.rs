@@ -23,6 +23,8 @@ pub mod red;
 pub mod rtc_config;
 pub mod sdp;
 pub mod signal;
+#[cfg(feature = "aws-lc")]
+pub mod srtp_aws_lc;
 pub mod tcp;
 pub mod token;
 pub mod twirp;

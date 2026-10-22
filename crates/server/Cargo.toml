@@ -6,9 +6,9 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-# aws-lc (C and assembly) as an optional DTLS backend; without it the server
-# has no C dependency.
-aws-lc = ["dimpl/aws-lc-rs"]
+# aws-lc (C and assembly) as an optional DTLS and SRTP backend; without it
+# the server has no C dependency.
+aws-lc = ["dimpl/aws-lc-rs", "dep:aws-lc-rs"]
 # TURN over TLS terminated by natter itself (rustls on aws-lc). Without it,
 # TLS can be terminated in front of natter and forwarded to the TURN port.
 tls = ["dep:rustls", "dep:hyper-rustls"]
@@ -55,6 +55,8 @@ tower-http = { version = "0.6", features = ["fs", "set-header", "trace"] }
 # tables; dimpl itself is on 0.13), see livekit::dtls_crypto; or, built with
 # the `aws-lc` feature, its aws-lc one (NATTER_DTLS_CRYPTO=aws-lc).
 dimpl = { version = "0.7", default-features = false, features = ["rust-crypto"] }
+# With the `aws-lc` feature: SRTP on it (livekit::srtp_aws_lc).
+aws-lc-rs = { version = "1", optional = true, default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }
 der = "0.7"
 p256 = { version = "0.14", default-features = false, features = ["ecdsa", "pkcs8", "precomputed-tables", "std"] }
 x509-cert = { version = "0.2", default-features = false }
