@@ -6,7 +6,7 @@
 #
 # usage: bench/compare.sh ROOMS [ROUNDS] SERVER...   (natter-load options in $LOAD_ARGS)
 #   natter       natter, one engine            (target/release/natter-server)
-#   natter:N     natter, N engines packed 250 participants each
+#   natter:N     natter, N engines (filled as by default, NATTER_SHARD_FILL)
 #   livekit      livekit/livekit-server in Docker ($LIVEKIT_IMAGE)
 #   str0m-chat   str0m's chat example, patched for rooms (bench/servers/str0m-chat)
 # Needs: cargo build --release -p natter-server -p natter-load, Docker for
@@ -37,7 +37,7 @@ run() { # SERVER ROUND
     natter|natter:*)
       local shards=1; [[ $server == natter:* ]] && shards=${server#natter:}
       rm -rf "$DATA"/*
-      NATTER_SHARDS=$shards NATTER_SHARD_FILL=250 NATTER_MAX_PEERS=5000 LIVEKIT_KEYS="devkey: secret" \
+      NATTER_SHARDS=$shards NATTER_MAX_PEERS=5000 LIVEKIT_KEYS="devkey: secret" \
         RUST_LOG=natter_server=warn NATTER_HTTP_ADDR=127.0.0.1:7880 NATTER_ORIGIN=http://localhost:7880 \
         NATTER_PUBLIC_IP=127.0.0.1 NATTER_UDP_PORT=7882 NATTER_DATA_DIR="$DATA" \
         target/release/natter-server >"$OUT/$name-$round.log" 2>&1 &
