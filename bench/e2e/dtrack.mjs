@@ -1,20 +1,10 @@
-// Data tracks with the JS SDK, run against natter or LiveKit on :7880.
-import { createRequire } from 'module';
-import crypto from 'crypto';
-const require = createRequire(process.env.PLAYWRIGHT_DIR ?? `${process.cwd()}/`);
-const { chromium } = require('playwright-core');
-const LK = 'ws://localhost:7880';
-const PAGE = process.env.PAGE ?? 'http://localhost:8766/index.html';
-const b64 = (b) => Buffer.from(b).toString('base64url');
+// Data tracks with the JS SDK, run against natter or LiveKit on :7880:
+// publish, frames, permissions, unpublish; or, with DT_RESUME=1 (as
+// dtresume.mjs sets), frames across a signal resume instead.
+import { DUAL, LK, PAGE, grant, launch, sleep, token as tok } from './lib.mjs';
 const room = `dt${Date.now() % 100000}`;
-function token(identity) {
-  const now = Math.floor(Date.now() / 1000);
-  const h = b64(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-  const p = b64(JSON.stringify({ iss: 'devkey', sub: identity, name: identity, nbf: now, exp: now + 3600, video: { room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true } }));
-  return `${h}.${p}.${crypto.createHmac('sha256', 'secret').update(`${h}.${p}`).digest('base64url')}`;
-}
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const browser = await chromium.launch({ executablePath: process.env.CHROME, headless: true });
+const token = (identity) => tok(identity, grant(room));
+const browser = await launch();
 const ctx = await browser.newContext();
 const pages = {};
 for (const name of ['alice', 'bob', 'carol']) {
@@ -50,7 +40,7 @@ for (const name of ['alice', 'bob', 'carol']) {
       })();
     };
     await r.connect(url, tok);
-  }, [LK, token(name), !!process.env.DUAL]);
+  }, [LK, token(name), DUAL]);
   pages[name] = p;
 }
 await sleep(1500);
@@ -81,16 +71,22 @@ const push = (tag) => alice.evaluate(async (tag) => {
   }
   return `${tag}: pushed ${ok}`;
 }, tag);
-console.log(`  ${await push('round 1')}`);
-await sleep(1500);
-// Only carol may have it now.
-await alice.evaluate(() => window.r.localParticipant.setTrackSubscriptionPermissions(false, [{ participantIdentity: 'carol', allowAll: true }]));
-await sleep(1000);
-await carol.evaluate(() => window.read('alice', 'telemetry'));
-await sleep(1500);
-console.log(`  ${await push('round 2')}`);
-await sleep(1500);
-await alice.evaluate(() => window.track.unpublish());
+if (process.env.DT_RESUME) {
+  await alice.evaluate(async () => { window.r.on(LivekitClient.RoomEvent.Reconnected, () => window.got.push('reconnected')); window.r.on(LivekitClient.RoomEvent.Reconnecting, () => window.got.push('reconnecting')); await window.r.simulateScenario('signal-reconnect'); });
+  await sleep(4000);
+  console.log(`  ${await push('after resume')}`);
+} else {
+  console.log(`  ${await push('round 1')}`);
+  await sleep(1500);
+  // Only carol may have it now.
+  await alice.evaluate(() => window.r.localParticipant.setTrackSubscriptionPermissions(false, [{ participantIdentity: 'carol', allowAll: true }]));
+  await sleep(1000);
+  await carol.evaluate(() => window.read('alice', 'telemetry'));
+  await sleep(1500);
+  console.log(`  ${await push('round 2')}`);
+  await sleep(1500);
+  await alice.evaluate(() => window.track.unpublish());
+}
 await sleep(1500);
 for (const [n, p] of Object.entries(pages)) {
   const { got, frames } = await p.evaluate(() => ({ got: window.got.splice(0), frames: window.frames }));

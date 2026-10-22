@@ -2,25 +2,10 @@
 // LiveKit on :7880. alice publishes video with timestamps and frame ids in
 // a trailer; bob has the frame-metadata worker (CAP_PACKET_TRAILER), carol
 // hasn't, so the server should strip the trailer for her.
-import { createRequire } from 'module';
-import crypto from 'crypto';
-const require = createRequire(process.env.PLAYWRIGHT_DIR ?? `${process.cwd()}/`);
-const { chromium } = require('playwright-core');
-const LK = 'ws://localhost:7880';
-const PAGE = process.env.PAGE ?? 'http://localhost:8766/index.html';
-const b64 = (b) => Buffer.from(b).toString('base64url');
+import { DUAL, LK, PAGE, grant, launch, sleep, token as tok } from './lib.mjs';
 const room = `tr${Date.now() % 100000}`;
-function token(identity) {
-  const now = Math.floor(Date.now() / 1000);
-  const h = b64(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-  const p = b64(JSON.stringify({ iss: 'devkey', sub: identity, name: identity, nbf: now, exp: now + 3600, video: { room, roomJoin: true, canPublish: true, canSubscribe: true } }));
-  return `${h}.${p}.${crypto.createHmac('sha256', 'secret').update(`${h}.${p}`).digest('base64url')}`;
-}
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const browser = await chromium.launch({
-  executablePath: process.env.CHROME, headless: true,
-  args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required'],
-});
+const token = (identity) => tok(identity, grant(room));
+const browser = await launch();
 const ctx = await browser.newContext();
 const pages = {};
 for (const [name, worker] of [['alice', true], ['bob', true], ['carol', false]]) {
@@ -74,7 +59,7 @@ for (const [name, worker] of [['alice', true], ['bob', true], ['carol', false]])
     if (name === 'alice') {
       await r.localParticipant.setCameraEnabled(true, undefined, { simulcast: false, frameMetadata: { timestamp: true, frameId: true } });
     }
-  }, [LK, token(name), worker, name, !!process.env.DUAL]);
+  }, [LK, token(name), worker, name, DUAL]);
   pages[name] = p;
 }
 await sleep(8000);

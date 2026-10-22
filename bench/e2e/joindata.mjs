@@ -1,22 +1,10 @@
 // Reliable data to someone joining: alice sends a numbered message every
 // 5 ms while bob joins. Does bob get everything sent since he joined, with
 // no gaps? Run against natter or LiveKit on :7880.
-import { createRequire } from 'module';
-import crypto from 'crypto';
-const require = createRequire(process.env.PLAYWRIGHT_DIR ?? `${process.cwd()}/`);
-const { chromium } = require('playwright-core');
-const LK = 'ws://localhost:7880';
-const PAGE = process.env.PAGE ?? 'http://localhost:8766/index.html';
-const b64 = (b) => Buffer.from(b).toString('base64url');
+import { DUAL, LK, PAGE, grant, launch, sleep, token as tok } from './lib.mjs';
 const room = `jd${Date.now() % 100000}`;
-function token(identity) {
-  const now = Math.floor(Date.now() / 1000);
-  const h = b64(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-  const p = b64(JSON.stringify({ iss: 'devkey', sub: identity, name: identity, nbf: now, exp: now + 3600, video: { room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true } }));
-  return `${h}.${p}.${crypto.createHmac('sha256', 'secret').update(`${h}.${p}`).digest('base64url')}`;
-}
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const browser = await chromium.launch({ executablePath: process.env.CHROME, headless: true });
+const token = (identity) => tok(identity, grant(room));
+const browser = await launch();
 const ctx = await browser.newContext();
 const open = async (name, joinedHook) => {
   const p = await ctx.newPage();
@@ -28,7 +16,7 @@ const open = async (name, joinedHook) => {
     window.got = [];
     r.on(L.RoomEvent.DataReceived, (payload) => window.got.push(Number(new TextDecoder().decode(payload))));
     window.join = () => r.connect(url, tok);
-  }, [LK, token(name), !!process.env.DUAL]);
+  }, [LK, token(name), DUAL]);
   return p;
 };
 const alice = await open('alice');
