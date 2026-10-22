@@ -58,6 +58,7 @@ use super::video::{self, Layer};
 use super::webhook::{self, Webhooks};
 use crate::config::RoomDefaults;
 use crate::metrics::Metrics;
+use crate::netio::{RecvBatch, SendBatch};
 
 mod admin;
 mod agents;
@@ -1072,6 +1073,8 @@ pub struct Engine {
     tracks_counted: [i64; 4],
     tracks_counted_at: Option<Instant>,
     socket: UdpSocket,
+    /// Datagrams to send at the end of this pass.
+    sends: SendBatch,
     /// ICE/TCP, when on: frames to and from the TCP thread, and which
     /// transport each TCP peer's frames go to.
     tcp: Option<tcp::Link>,
@@ -1147,6 +1150,7 @@ pub fn run(
         tracks_counted: [0; 4],
         tracks_counted_at: None,
         socket,
+        sends: Default::default(),
         tcp,
         tcp_routes: HashMap::new(),
         ice_prefs: HashMap::new(),
@@ -1174,7 +1178,7 @@ pub fn run(
         back,
         wake,
     };
-    let mut buf = vec![0u8; 2000];
+    let mut batch = RecvBatch::default();
     let mut read_timeout = None;
     let mut scan_all = true;
     let mut next_speakers = Instant::now();
@@ -1298,11 +1302,20 @@ pub fn run(
                 .expect("setting socket read timeout");
             read_timeout = wait;
         }
-        engine.receive(&mut buf);
+        engine.flush_sends();
+        engine.receive(&mut batch);
     }
 }
 
 impl Engine {
+    /// Sends the datagrams queued this pass.
+    fn flush_sends(&mut self) {
+        let failed = self.sends.flush(&self.socket);
+        self.metrics
+            .udp_send_errors_total
+            .fetch_add(failed, Relaxed);
+    }
+
     /// Polls a transport and files its next deadline. `always` pushes even
     /// an unchanged deadline (its heap entry was just consumed).
     fn poll_and_schedule(&mut self, i: usize, side: Side, now: Instant, always: bool) {
@@ -1314,9 +1327,11 @@ impl Engine {
         }
     }
 
-    fn receive(&mut self, buf: &mut [u8]) {
-        let (n, source) = match self.socket.recv_from(buf) {
-            Ok(r) => r,
+    /// Reads what has arrived (waiting for the first datagram up to the
+    /// socket's read timeout) and hands each datagram to its transport.
+    fn receive(&mut self, batch: &mut RecvBatch) {
+        let n = match batch.recv(&self.socket) {
+            Ok(n) => n,
             Err(e) => {
                 if !matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
                     warn!("UDP read failed: {e}");
@@ -1324,27 +1339,39 @@ impl Engine {
                 return;
             }
         };
-        if self.tcp.as_ref().is_some_and(|t| t.wake_from == source) {
-            return self.receive_tcp();
-        }
-        if source == self.wake.from {
-            return;
-        }
         let destination = self.local;
-        let media = buf[0] >= 20;
-        let Ok(contents) = buf[..n].try_into() else {
-            return;
-        };
-        let input = Input::Receive(
-            Instant::now(),
-            Receive {
-                proto: Protocol::Udp,
-                source,
-                destination,
-                contents,
-            },
-        );
-        self.route(input, source, false, media);
+        for k in 0..n {
+            let Some((data, source)) = batch.get(k) else {
+                continue;
+            };
+            if self.tcp.as_ref().is_some_and(|t| t.wake_from == source) {
+                self.receive_tcp();
+                continue;
+            }
+            if source == self.wake.from {
+                continue;
+            }
+            let media = data.first().is_some_and(|b| *b >= 20);
+            let Ok(contents) = data.try_into() else {
+                continue;
+            };
+            let input = Input::Receive(
+                Instant::now(),
+                Receive {
+                    proto: Protocol::Udp,
+                    source,
+                    destination,
+                    contents,
+                },
+            );
+            // str0m in RTP mode holds one received packet until polled:
+            // poll before the next datagram, which may be for it too.
+            if let Some((i, side)) = self.route(input, source, false, media)
+                && k + 1 < n
+            {
+                self.poll_and_schedule(i, side, Instant::now(), false);
+            }
+        }
     }
 
     /// Frames the TCP thread has passed on.
@@ -1454,6 +1481,7 @@ impl Engine {
             return t.deadline;
         }
         t.dirty = false;
+        // Fed a timeout, and nothing has come out since.
         let mut fed = false;
         loop {
             if !t.rtc.is_alive() {
@@ -1462,17 +1490,24 @@ impl Engine {
             }
             match t.rtc.poll_output() {
                 Ok(Output::Transmit(tx)) if tx.proto == Protocol::Tcp => {
+                    fed = false;
                     if let Some(link) = &self.tcp {
                         link.send(tx.destination, &tx.contents);
                     }
                 }
                 Ok(Output::Transmit(tx)) => {
-                    if let Err(e) = self.socket.send_to(&tx.contents, tx.destination) {
-                        debug!("UDP send failed: {e}");
-                        self.metrics.udp_send_errors_total.fetch_add(1, Relaxed);
+                    fed = false;
+                    if self.sends.push(tx.destination, tx.contents.into()) {
+                        let failed = self.sends.flush(&self.socket);
+                        self.metrics
+                            .udp_send_errors_total
+                            .fetch_add(failed, Relaxed);
                     }
                 }
-                // The pacer releases a written packet only after a timeout.
+                // The pacer releases a written packet only after a timeout:
+                // feed it again while that releases something, as packets
+                // read in one batch are written at once (waiting for the
+                // next pass left them for the socket's read timeout, 1 ms+).
                 Ok(Output::Timeout(at)) if !fed && at <= Instant::now() => {
                     fed = true;
                     let _ = t.rtc.handle_input(Input::Timeout(Instant::now()));
