@@ -308,19 +308,7 @@ impl Engine {
     fn admin_update_participant(&mut self, req: lk::UpdateParticipantRequest) -> AdminResult {
         let i = self.member(&req.room, &req.identity)?;
         let p = &mut self.participants[i];
-        if !req.name.is_empty() {
-            p.name = req.name;
-        }
-        if !req.metadata.is_empty() {
-            p.metadata = req.metadata;
-        }
-        for (k, v) in req.attributes {
-            if v.is_empty() {
-                p.attributes.remove(&k);
-            } else {
-                p.attributes.insert(k, v);
-            }
-        }
+        p.apply_info(req.name, req.metadata, req.attributes);
         if let Some(perm) = req.permission {
             let g = &mut p.grant;
             g.can_publish = Some(perm.can_publish);
@@ -407,18 +395,11 @@ impl Engine {
             ..Default::default()
         };
         let encoded = packet.encode_to_vec();
-        let members = self.rooms[req.room.as_str()].members.clone();
-        for j in members {
-            let p = &self.participants[j];
-            let named = !req.destination_identities.is_empty() || !req.destination_sids.is_empty();
-            if named
-                && !req.destination_identities.contains(&p.identity)
-                && !req.destination_sids.contains(&p.sid)
-            {
-                continue;
-            }
-            self.deliver(j, kind, &encoded, None);
-        }
+        let to = (
+            req.destination_identities.as_slice(),
+            req.destination_sids.as_slice(),
+        );
+        self.deliver_to_room(&req.room, None, to, kind, &encoded, None);
         Ok(AdminReply::Done)
     }
 

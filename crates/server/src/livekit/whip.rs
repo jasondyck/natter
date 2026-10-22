@@ -383,18 +383,10 @@ pub async fn create(
         c.set_whip(&sid).await;
     }
 
-    let mut resp = (StatusCode::CREATED, answer).into_response();
-    cors(&mut resp);
+    let mut resp = sdp_response(StatusCode::CREATED, answer, "application/sdp", &ufrag);
     let h = resp.headers_mut();
-    h.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/sdp"),
-    );
     if let Ok(v) = HeaderValue::from_str(&format!("/whip/v1/{sid}")) {
         h.insert(header::LOCATION, v);
-    }
-    if let Ok(v) = HeaderValue::from_str(&format!("\"{ufrag}\"")) {
-        h.insert(header::ETAG, v);
     }
     for link in link_headers(&ice_servers) {
         if let Ok(v) = HeaderValue::from_str(&link) {
@@ -583,14 +575,27 @@ async fn restart(
         }
     }
     body.push_str("a=end-of-candidates\r\n");
-    let mut resp = (StatusCode::OK, body).into_response();
+    sdp_response(
+        StatusCode::OK,
+        body,
+        "application/trickle-ice-sdpfrag",
+        new_ufrag,
+    )
+}
+
+/// An SDP (or SDP fragment) response with CORS, its content type, and the
+/// ICE ufrag as its entity tag (WHIP's ICE restarts check it).
+fn sdp_response(
+    status: StatusCode,
+    body: String,
+    content_type: &'static str,
+    ufrag: &str,
+) -> Response {
+    let mut resp = (status, body).into_response();
     cors(&mut resp);
     let h = resp.headers_mut();
-    h.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/trickle-ice-sdpfrag"),
-    );
-    if let Ok(v) = HeaderValue::from_str(&format!("\"{new_ufrag}\"")) {
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    if let Ok(v) = HeaderValue::from_str(&format!("\"{ufrag}\"")) {
         h.insert(header::ETAG, v);
     }
     resp
