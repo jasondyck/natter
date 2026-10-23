@@ -242,6 +242,31 @@ engine. It is now worked out once per full `handle_timeout` and kept
 follows. Audio, 100 rooms: 10.8 → 10.4 µs of CPU per forward; the
 congestion grid as before.
 
+### Patch: TWCC reports find their first record by binary search
+
+`TwccSendRegister::apply_report` found where a report starts by walking
+the register (1000 records, in sequence order) from its oldest record,
+on every TWCC report. It binary-searches instead, as the same function
+already did a few lines later. Video, 15 rooms: −0.9% instructions,
+31.6 → 30.8 µs of CPU per forward.
+
+### Patch: pacer bursts without a timeout per packet
+
+The leaky-bucket pacer let one packet out per `handle_timeout`: after
+each, `poll_queue` stayed shut until another timeout, which snapshots
+every stream's queue (`update_queue_state`) and picks again. Inside a
+burst (debt below the burst interval) and with nothing queued between
+two polls, that pick is the same queue until it is empty. So
+`handle_timeout` now also hands `poll_queue` the rest of the chosen
+queue's media packets (`Burst`; `QueueState::media_packets` counts
+queued and resent packets, not padding), which it lets out while the
+debt still leaves room, as `next_poll` would. Not while probing, not
+for padding; any timeout starts over. Video, 15 rooms: −16%
+instructions, 32.1 → 28.2 µs of CPU per forward, latency p50 0.31 →
+0.27 ms; simulcast latency, the congestion grid (its noisy 4 Mbit/s,
+0 ms cell over 12 runs each) and Chrome through a thin link
+(`bench/e2e/thin`) as before.
+
 ## is 0.11.1
 
 str0m's ICE agent, vendored the same way (first commit as published).

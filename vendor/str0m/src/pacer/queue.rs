@@ -74,6 +74,9 @@ pub struct QueueState {
     pub unpaced: bool,
     pub use_for_padding: bool,
     pub snapshot: QueueSnapshot,
+    /// natter: of `snapshot.packet_count`, the media packets (queued and
+    /// resends): what a pacer burst may take without another timeout.
+    pub media_packets: u32,
 }
 
 /// A request to generate a specific amount of padding.

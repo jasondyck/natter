@@ -1190,6 +1190,7 @@ impl StreamTx {
         if let Some(snapshot_resend) = self.queue_state_resend(now) {
             snapshot.merge(&snapshot_resend);
         }
+        let media_packets = snapshot.packet_count;
 
         if let Some(snapshot_padding) = self.queue_state_padding(now) {
             snapshot.merge(&snapshot_padding);
@@ -1202,6 +1203,7 @@ impl StreamTx {
             unpaced,
             use_for_padding,
             snapshot,
+            media_packets,
         }
     }
 

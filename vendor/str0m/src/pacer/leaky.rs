@@ -50,6 +50,23 @@ pub struct LeakyBucketPacer {
     completed_probe: Option<TwccClusterId>,
     /// Gates poll_queue() until handle_timeout() is called after packet emission.
     needs_timeout_before_next_poll: bool,
+    /// natter: more packets `poll_queue` may take from the queue it chose
+    /// without a `handle_timeout` in between (see [`Burst`]).
+    burst: Option<Burst>,
+}
+
+/// natter: the rest of a queue that the last `handle_timeout` would let
+/// go out now. Nothing is queued while `poll_output` drains, so until
+/// this queue is empty (or the debt reaches the burst interval) another
+/// `handle_timeout` would choose it again: skip re-snapshotting every
+/// stream once per packet.
+#[derive(Debug, Clone, Copy)]
+struct Burst {
+    midrid: MidRid,
+    /// Media packets left in the queue's snapshot after the first.
+    left: u32,
+    /// Unpaced queues go regardless of debt.
+    unpaced: bool,
 }
 
 impl Pacer for LeakyBucketPacer {
@@ -83,6 +100,7 @@ impl Pacer for LeakyBucketPacer {
     ) -> Option<PaddingRequest> {
         // Clear the gate when time advances
         self.needs_timeout_before_next_poll = false;
+        self.burst = None;
 
         // Clear the poll time - it will be recalculated below if needed.
         // This is important because if we return early (e.g., next_poll_queue is already set),
@@ -114,7 +132,20 @@ impl Pacer for LeakyBucketPacer {
             // that we should poll a different queue i.e. media could be queued.
             self.next_poll_queue = None;
         } else {
+            let can_burst = matches!(
+                next_poll_time_and_reason.1,
+                PacerReason::Paced | PacerReason::Unpaced
+            ) && self.probe_queue.is_empty();
+            let burst = queue.filter(|_| can_burst).and_then(|q| {
+                let left = q.media_packets.checked_sub(1).filter(|n| *n > 0)?;
+                Some(Burst {
+                    midrid: q.midrid,
+                    left,
+                    unpaced: q.unpaced,
+                })
+            });
             self.next_poll_queue = queue.map(|q| q.midrid);
+            self.burst = burst;
         }
 
         self.next_poll_time = Some(next_poll_time_and_reason);
@@ -125,7 +156,7 @@ impl Pacer for LeakyBucketPacer {
     fn poll_queue(&mut self) -> Option<(MidRid, Option<TwccClusterId>)> {
         // GATE: Block if we need timeout first
         if self.needs_timeout_before_next_poll {
-            return None;
+            return self.poll_burst();
         }
 
         let next = self.next_poll_queue.take()?;
@@ -182,7 +213,29 @@ impl LeakyBucketPacer {
             probe_queue: VecDeque::new(),
             completed_probe: None,
             needs_timeout_before_next_poll: true,
+            burst: None,
         }
+    }
+
+    /// natter: the next packet of a [`Burst`], while the debt leaves room
+    /// for it as `next_poll` would (below the burst interval).
+    fn poll_burst(&mut self) -> Option<(MidRid, Option<TwccClusterId>)> {
+        let burst = self.burst.as_mut()?;
+        let room = burst.unpaced
+            || (self.adjusted_bitrate > Bitrate::ZERO && {
+                let burst_interval = PACING.min(MAX_BURST_SIZE / self.adjusted_bitrate);
+                self.media_debt / self.adjusted_bitrate < burst_interval
+            });
+        if !room || !self.probe_queue.is_empty() {
+            self.burst = None;
+            return None;
+        }
+        burst.left -= 1;
+        let midrid = burst.midrid;
+        if burst.left == 0 {
+            self.burst = None;
+        }
+        Some((midrid, None))
     }
 
     /// Start executing a probe cluster.
@@ -501,6 +554,7 @@ mod test {
                 created_at: now,
                 ..Default::default()
             },
+            media_packets: 0,
         };
         pacer.handle_timeout(now, std::iter::once(queue));
         pacer.start_probe(ProbeClusterConfig::new(
@@ -924,6 +978,7 @@ mod test {
                 first_unsent: None,
                 priority: QueuePriority::Media,
             },
+            media_packets: 0,
         };
 
         let other = QueueState {
@@ -939,6 +994,7 @@ mod test {
                 first_unsent: Some(now + duration_ms(19)),
                 priority: QueuePriority::Padding,
             },
+            media_packets: 0,
         };
 
         state.snapshot.merge(&other.snapshot);
@@ -1458,6 +1514,11 @@ mod test {
                         first_unsent: self.queue.iter().next().map(|p| p.queued_at),
                         priority: self.priority,
                     },
+                    media_packets: self
+                        .queue
+                        .iter()
+                        .filter(|p| p.kind != PacketKind::Padding)
+                        .count() as u32,
                 }
             }
         }
