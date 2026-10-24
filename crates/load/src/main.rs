@@ -57,6 +57,10 @@ struct Args {
     /// Clients per room that receive every publisher (and send nothing).
     #[arg(long, default_value_t = 4)]
     subscribers: u32,
+    /// With --video: clients per room that send audio as well, so audio
+    /// shares subscribers' links with video. Audio is reported apart.
+    #[arg(long, default_value_t = 0, requires = "video")]
+    audio_publishers: u32,
     /// Time after everyone is connected before measuring starts.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
     warmup: Duration,
@@ -91,6 +95,10 @@ struct Args {
     /// all of --video-kbps).
     #[arg(long, requires = "video")]
     simulcast: bool,
+    /// Subscribers ask for no more than this layer of each video track:
+    /// q (320×180), h (640×360) or f.
+    #[arg(long, value_parser = parse_quality, requires = "simulcast")]
+    sub_quality: Option<u8>,
     /// Every client's downlink is a bottleneck of this many kbit/s, with a
     /// queue (--down-queue-ms) that drops packets when full.
     #[arg(long)]
@@ -154,6 +162,15 @@ fn parse_ms(s: &str) -> Result<Duration, String> {
     match s.parse::<f64>() {
         Ok(ms) => Ok(Duration::from_secs_f64(ms / 1000.0)),
         Err(_) => parse_duration(s),
+    }
+}
+
+fn parse_quality(s: &str) -> Result<u8, String> {
+    match s {
+        "q" => Ok(0),
+        "h" => Ok(1),
+        "f" => Ok(2),
+        _ => Err(format!("expected q, h or f, not {s:?}")),
     }
 }
 
@@ -235,11 +252,16 @@ async fn run(args: Args) -> anyhow::Result<()> {
             delay: args.down_delay_ms,
             jitter: args.down_jitter_ms,
         }),
+        split_audio: args.audio_publishers > 0,
     };
+    if args.audio_publishers > 0 && matches!(args.target, Target::Str0mChat) {
+        bail!("--audio-publishers needs LiveKit signalling");
+    }
+    use str0m::media::MediaKind;
     let kind = if args.video {
-        str0m::media::MediaKind::Video
+        MediaKind::Video
     } else {
-        str0m::media::MediaKind::Audio
+        MediaKind::Audio
     };
     let workers = (0..args.workers.max(1))
         .map(|i| Worker::spawn(i, shared.clone(), options))
@@ -247,28 +269,41 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let ctx = Ctx::new(
         args.url.clone(),
         args.bind,
-        kind,
         args.simulcast,
         args.video_kbps * 1000,
+        args.sub_quality,
         workers.clone(),
     );
 
     // Publishers first, so subscribers find every track as they join.
-    let per_room = args.publishers + args.subscribers;
+    // Audio publishers (with --audio-publishers) come after the others in
+    // a room, and their ids after all the others'.
+    let senders = args.publishers + args.audio_publishers;
+    let per_room = senders + args.subscribers;
+    let audio_ids = args.rooms * args.publishers;
     let mut clients = Vec::new();
     for publishing in [true, false] {
         for room in 0..args.rooms {
             let (first, count) = if publishing {
-                (0, args.publishers)
+                (0, senders)
             } else {
-                (args.publishers, args.subscribers)
+                (senders, args.subscribers)
             };
             for index in first..first + count {
+                let (publisher, kind) = match index {
+                    _ if !publishing => (None, kind),
+                    i if i < args.publishers => (Some(room * args.publishers + i), kind),
+                    i => (
+                        Some(audio_ids + room * args.audio_publishers + i - args.publishers),
+                        MediaKind::Audio,
+                    ),
+                };
                 clients.push(Client {
                     key: ClientKey { room, index },
                     room: format!("{}-{room}", args.room_prefix),
                     identity: format!("{}-{room}-{index}", args.room_prefix),
-                    publisher: publishing.then_some(room * args.publishers + index),
+                    publisher,
+                    kind,
                 });
             }
         }
@@ -276,7 +311,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let total = clients.len();
     eprintln!(
         "joining {total} clients: {} rooms × ({} publishers + {} subscribers)",
-        args.rooms, args.publishers, args.subscribers
+        args.rooms, senders, args.subscribers
     );
 
     let http = reqwest::Client::new();
@@ -313,9 +348,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let deadline = Instant::now() + args.ready_timeout;
     let readiness = loop {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        let r = readiness(&workers, args.publishers).await;
-        let done = r.publishers == args.rooms * args.publishers
-            && r.subscribers == args.rooms * args.subscribers;
+        let r = readiness(&workers, senders).await;
+        let done =
+            r.publishers == args.rooms * senders && r.subscribers == args.rooms * args.subscribers;
         if done || Instant::now() >= deadline {
             break r;
         }
@@ -323,10 +358,10 @@ async fn run(args: Args) -> anyhow::Result<()> {
     eprintln!(
         "ready: {}/{} publishers sending, {}/{} subscribers hearing all {} publishers",
         readiness.publishers,
-        args.rooms * args.publishers,
+        args.rooms * senders,
         readiness.subscribers,
         args.rooms * args.subscribers,
-        args.publishers,
+        senders,
     );
 
     shared.lossy.store(true, Relaxed);
@@ -356,12 +391,14 @@ async fn run(args: Args) -> anyhow::Result<()> {
     shared.lossy.store(false, Relaxed);
 
     let mut receipts = Receipts::default();
+    let mut audio = Receipts::default();
     let mut sent = HashMap::new();
     let (mut dropped_down, mut dropped_up, mut send_errors) = (0, 0, 0);
     let mut video = VideoCounts::default();
     for w in &workers {
         let r = w.report().await;
         receipts.merge(&r.receipts);
+        audio.merge(&r.audio);
         for (publisher, n) in r.sent {
             *sent.entry(publisher).or_insert(0u64) += n;
         }
@@ -370,8 +407,15 @@ async fn run(args: Args) -> anyhow::Result<()> {
         send_errors += r.send_errors;
         video.merge(&r.video);
     }
-    let sent_total: u64 = sent.values().sum();
+    let sent_by = |audio: bool| -> u64 {
+        sent.iter()
+            .filter(|&(&p, _)| (args.audio_publishers > 0 && p >= audio_ids) == audio)
+            .map(|(_, n)| n)
+            .sum()
+    };
+    let sent_total = sent_by(false);
     let expected = sent_total * u64::from(args.subscribers);
+    let audio_expected = sent_by(true) * u64::from(args.subscribers);
     let secs = measured.as_secs_f64();
     let server = match (server_before, server_after) {
         (Some(a), Some(b)) => Some(usage(a, b, measured, receipts.unique)),
@@ -379,6 +423,20 @@ async fn run(args: Args) -> anyhow::Result<()> {
     };
     let load = usage(self_before, self_after, measured, receipts.unique);
     let q = |p: f64| receipts.latency.value_at_quantile(p) as f64 / 1000.0;
+    let audio = (args.audio_publishers > 0).then(|| {
+        let q = |p: f64| audio.latency.value_at_quantile(p) as f64 / 1000.0;
+        AudioResults {
+            publishers: args.audio_publishers,
+            receipts_expected: audio_expected,
+            receipts_unique: audio.unique,
+            loss_percent: 100.0 * (1.0 - audio.unique as f64 / audio_expected.max(1) as f64),
+            late: audio.late,
+            latency_ms_p50: q(0.5),
+            latency_ms_p99: q(0.99),
+            latency_ms_p999: q(0.999),
+            latency_ms_max: audio.latency.max() as f64 / 1000.0,
+        }
+    });
 
     let results = Results {
         target: format!("{:?}", args.target),
@@ -386,6 +444,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         video_kbps: args.video.then_some(args.video_kbps),
         fps: args.video.then_some(args.fps),
         video: args.video.then_some(video),
+        audio,
         undecodable_percent: args
             .video
             .then(|| 100.0 * video.undecodable as f64 / expected.max(1) as f64),
@@ -503,6 +562,19 @@ fn usage(before: Sample, after: Sample, wall: Duration, forwards: u64) -> Usage 
 }
 
 #[derive(Debug, Serialize)]
+struct AudioResults {
+    publishers: u32,
+    receipts_expected: u64,
+    receipts_unique: u64,
+    loss_percent: f64,
+    late: u64,
+    latency_ms_p50: f64,
+    latency_ms_p99: f64,
+    latency_ms_p999: f64,
+    latency_ms_max: f64,
+}
+
+#[derive(Debug, Serialize)]
 struct Results {
     target: String,
     /// What publishers sent; for video, packets below are frames.
@@ -510,6 +582,8 @@ struct Results {
     video_kbps: Option<u32>,
     fps: Option<u32>,
     video: Option<VideoCounts>,
+    /// Audio from --audio-publishers, counted apart from the video above.
+    audio: Option<AudioResults>,
     /// Frames received but not decodable (waiting for a keyframe), as a
     /// share of those expected.
     undecodable_percent: Option<f64>,
@@ -588,6 +662,21 @@ fn print(r: &Results) {
             pct(v.layer_frames[0]),
             pct(v.layer_frames[1]),
             pct(v.layer_frames[2])
+        );
+    }
+    if let Some(a) = &r.audio {
+        println!(
+            "  audio     {} publishers: {} of {} receipts ({:.3}% lost), {} later than {} ms; latency p50 {:.2} ms, p99 {:.2}, p99.9 {:.2}, max {:.2}",
+            a.publishers,
+            a.receipts_unique,
+            a.receipts_expected,
+            a.loss_percent,
+            a.late,
+            stats::LATE_US / 1000,
+            a.latency_ms_p50,
+            a.latency_ms_p99,
+            a.latency_ms_p999,
+            a.latency_ms_max
         );
     }
     if let Some(v) = &r.video

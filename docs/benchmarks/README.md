@@ -6,19 +6,19 @@ client, [`natter-load`](../../crates/load), so differences are the servers'.
 
 **Summary, audio rooms of 4 publishers + 4 subscribers:**
 
-- natter uses **32–48% less CPU** than LiveKit 1.13.10 for the same
-  traffic, and **a fifth of the memory**.
-- Neither lost a packet at any load tested, up to 80,000 forwarded
-  packets a second. natter's latency stayed lower: p99 under 0.85 ms,
-  against LiveKit's 0.2–14 ms.
+- natter uses **38–68% less CPU** than LiveKit 1.13.10 for the same
+  traffic, and **a quarter to a third of the memory**.
+- natter lost no packet at any load tested, up to 80,000 forwarded
+  packets a second, with latency p99 under 1 ms. LiveKit lost none up to
+  60 rooms (p99 0.3–1.7 ms); at 100 rooms, using 163% of a core, it lost
+  0.06–0.15% with p99 above a second.
 - Under 5% packet loss, natter's resends recover more of it (0.002% left
   vs 0.26%) and sooner.
-- Setting clients up takes about as long in small rooms (p99 0.24 s vs
-  0.22 s at 8 rooms). With 16 clients joining at once into a busy
-  server, LiveKit's is shorter (p99 0.26–0.48 s vs natter's 0.35–0.58 s);
-  with `NATTER_DTLS_CRYPTO=aws-lc`, natter matches it.
-- LiveKit does far more (simulcast, congestion control, TURN, server
-  APIs, egress; see [features](#features)).
+- Setting clients up is quicker on natter: p99 88–91 ms against
+  126–137 ms at 8 rooms, 170–193 ms against 317–383 ms at 100; at 60
+  rooms both are about 0.2 s.
+- LiveKit still has egress, ingress and SIP, which natter doesn't (see
+  [features](#features)).
 
 **Video, single-layer VP8 at 1.5 Mbit/s, under packet loss:** natter
 repairs more of it, sooner. At 5% loss each way no frame was lost or
@@ -37,21 +37,25 @@ undecodable against 11%. At 20% both break down. See
 
 | Rooms | Forwarded/s | natter CPU | LiveKit CPU | natter memory | LiveKit memory |
 |---|---|---|---|---|---|
-| 8 | 6,400 | 6.1% (9.5 µs/packet) | 11.1% (17.3 µs) | 48 MiB | 194 MiB |
-| 30 | 24,000 | 23.8% (9.9 µs) | 45.4% (18.9 µs) | 137 MiB | 662 MiB |
-| 60 | 48,000 | 55.4% (11.6 µs) | 90.4% (18.8 µs) | 262 MiB | 1.3 GiB |
-| 100 | 80,000 | 106% (13.3 µs) | 157% (19.6 µs) | 427 MiB | 2.0 GiB |
+| 8 | 6,400 | 5.0% (7.8 µs/packet) | 15.6% (24.3 µs) | 61 MiB | 194 MiB |
+| 30 | 24,000 | 19.3% (8.1 µs) | 52.7% (22.0 µs) | 171 MiB | 650 MiB |
+| 60 | 48,000 | 47.0% (9.8 µs) | 103.7% (21.6 µs) | 318 MiB | 1.3 GiB |
+| 100 | 80,000 | 100% (12.6 µs) | 163% (20.4 µs) | 525 MiB | 2.0 GiB |
 
 CPU is a share of one core, for the whole server process (natter) or
 container (LiveKit). Each figure is the mean of two runs, which agreed
-within 5%.
+within 5%. LiveKit cost 4–40% more here than in the earlier
+runs (2026-10-17) with the same image; sessions on a busy desktop drift,
+which is why the servers alternate within one. natter's memory is higher
+than then because engines now fill to 120 participants, so more of them
+run, each with its own 4 MiB socket buffers.
 
 | Rooms | natter latency p50 / p99 | LiveKit latency p50 / p99 | natter setup p50 / p99 | LiveKit setup p50 / p99 |
 |---|---|---|---|---|
-| 8 | 0.06 / 0.19 ms | 0.07 / 0.16–0.20 ms | 0.16 / 0.24 s | 0.19 / 0.22 s |
-| 30 | 0.17 / 0.50–0.58 ms | 0.16 / 0.53–0.56 ms | 0.30 / 0.38–0.43 s | 0.20 / 0.26–0.27 s |
-| 60 | 0.20 / 0.62–0.65 ms | 0.25 / 1.16–1.24 ms | 0.26 / 0.35–0.36 s | 0.21 / 0.28 s |
-| 100 | 0.22 / 0.80–0.84 ms | 0.45 / 5.0–14 ms | 0.32 / 0.55–0.58 s | 0.21 / 0.41–0.48 s |
+| 8 | 0.07 / 0.18 ms | 0.10–0.12 / 0.30–0.36 ms | 38–41 / 88–91 ms | 76–83 / 126–137 ms |
+| 30 | 0.12–0.13 / 0.33–0.35 ms | 0.18–0.19 / 0.65–0.70 ms | 77–86 / 156–161 ms | 93–94 / 167–169 ms |
+| 60 | 0.18 / 0.52–0.53 ms | 0.29–0.30 / 1.66–1.69 ms | 89–98 / 193–201 ms | 106–107 / 184–201 ms |
+| 100 | 0.21–0.22 / 0.98–0.99 ms | 199–238 / 1,177–1,295 ms | 107–117 / 170–193 ms | 117–122 / 317–383 ms |
 
 Latency is one way, from the publisher's send to the subscriber's
 receipt; both are in one process on loopback, so it is the server's own
@@ -59,7 +63,8 @@ delay. Setup is from starting to join until the client's last peer
 connection is up, with 16 clients joining at a time. Ranges are the two
 runs.
 
-**Setup.** natter's setup p99 was 1.2–1.4 s at first. Fixed since:
+**Setup.** natter's setup p99 was 1.2–1.4 s at first. Fixed since (the
+figures in this part are from 2026-10-17 to 2026-10-21):
 
 - As answerer it now starts the DTLS handshake itself, as browsers and
   LiveKit do, instead of waiting for a client ClientHello it might drop
@@ -95,9 +100,8 @@ rooms (47%), 99–101/175–178 ms at 60 (95%), 107–119/270–342 ms at 100
 (164–172%).
 
 **Cores.** natter runs one media engine per core and gives each room
-wholly to one engine. Rooms fill one engine (250 participants) before the
-next is used, so up to 30 rooms here ran on one core and 100 rooms on
-four. One engine alone can't carry 100 rooms: it lost 26% of packets
+wholly to one engine. Rooms fill one engine (120 participants) before the
+next is used, so 8 rooms here ran on one core and 100 rooms on seven. One engine alone can't carry 100 rooms: it lost 26% of packets
 (`r100-one` in the data). LiveKit spreads work over every core.
 
 ### Packet loss
@@ -189,8 +193,8 @@ client, which `natter-load` doesn't send).
 | 4 → 1 Mbit/s: frames not shown (lost + undecodable), loopback / 60 / 150 ms | 7.0–7.5 / 8.9–9.3 / 7.4–9.2% | 26 / 23 / 20% |
 | 4 → 1 Mbit/s: p99 latency | 599–601 / 657–684 / 772–814 ms | 1061 / 766 / 1094 ms |
 | 4 Mbit/s: frames on `f` | 96–99 / 87–98 / 91–92% | 100 / 100 / 100% |
-| 1 Mbit/s: p99 latency | 37–38 / 104–106 / 279–289 ms | 15 / 100 / 196 ms |
-| 1 Mbit/s: layers | one track `h`, one `q` | both `q` (83–100%) |
+| 1 Mbit/s: p99 latency | 34–37 / 95–98 / 196–245 ms (median 204) | 15 / 100 / 196 ms |
+| 1 Mbit/s: layers | `q`, one track `h` for 8–50% of frames | both `q` (83–100%) |
 | Server CPU | 1.2–2.6% of a core | 3.6–4.7% |
 
 No frame was lost on a steady link by either. natter ranges are two runs;
@@ -199,10 +203,73 @@ run. Audio-only rooms pay 2–5% more CPU with congestion control on (30
 rooms of 4 + 4: 24.7–25.2% against 23.9–24.2%, two sessions).
 
 When the link shrinks, natter loses a third as many frames as LiveKit and
-shows far fewer undecodable ones, with lower latency. What is left: at
-1 Mbit/s natter runs one track on `h`, which fits, but on a 150 ms path
-its probes and keyframes cost latency LiveKit doesn't pay by staying on
-`q`; and natter reaches `f` slightly less on longer paths.
+shows far fewer undecodable ones, with lower latency. natter reaches `f`
+slightly less on longer paths.
+
+The 1 Mbit/s rows are from 2026-10-22 (the rest from 2026-10-18). At
+150 ms natter's p99 was 279–289 ms, then 213–272 ms (median 236) on the
+same machine that day, and is now 196–215 ms in 11 of 12 runs (one
+245 ms). It came from upgrades that didn't fit: GCC's estimate creeps to
+about 1.08 Mbit/s on that path, which covered a second `h` track, and the
+queue built for ~600 ms before the detector saw it; and from upgrades
+taken on the 10 s peak while the current estimate had already fallen
+below what was sent. Both are closed in step 3 below.
+
+What is left of the gap is the video natter sends: on that link it keeps
+one track on `h` much of the time, LiveKit stays on `q`. With subscribers
+asking for `q` only (`natter-load --sub-quality q`), so both servers send
+the same, natter is ahead. Five interleaved runs of each, the same session:
+
+| 1 Mbit/s, 150 ms | p50 | p99 | frames on `h` |
+|---|---|---|---|
+| natter, subscribers ask for `q` | 172–173 ms | 186–187 ms | 0 |
+| LiveKit | 173–175 ms | 191–218 ms (median 199) | 0–8% |
+| natter | 178–184 ms | 203–266 ms (median 207) | 27–50% |
+
+An `h` frame is about three times a `q` frame, ~17 ms through the link
+against ~5, and keyframes four times that; LiveKit's p99 rises the same
+way in the runs where it tries `h`. Raw results in
+[`data/2026-10-22/congestion/same-video`](data/2026-10-22/congestion/same-video).
+
+**With audio on the same link.** One more participant per room sending
+audio (`--audio-publishers 1`), so each subscriber's 1 Mbit/s carries its
+audio too; five interleaved runs each:
+
+| 1 Mbit/s, 150 ms | audio p50 | audio p99 | audio lost | video lost |
+|---|---|---|---|---|
+| natter | 172–177 ms | 186–203 ms | 0 | 0 |
+| natter, subscribers ask for `q` | 171–173 ms | 184–190 ms | 0 | 0 |
+| LiveKit | 173–640 ms | 201 ms once, else 802–871 ms | 0 once, else 3.2–15.6% | 0 once, else 17–66% |
+
+natter's upgrades to `h` cost its audio ~10 ms at p99. LiveKit overloaded
+the link in four runs of five (14,000–175,000 packets dropped by the
+bottleneck's queue, against ~4,000 without the audio participant): it
+sent more video resends than original video packets, on the `h` and `f`
+layers rather than `q`, and the audio queued and was dropped behind them.
+
+**The same in Chrome.** To rule out `natter-load`'s receiver (str0m's
+NACKs, not a browser's), `bench/e2e/thin` runs the call with Chrome on
+both ends (2 cameras publishing 720p simulcast, a microphone, 3
+subscribers) through a shaping router with the same link. What Chrome's
+receivers reported, over 20 s:
+
+| 1 Mbit/s, 150 ms, Chrome | audio lost | audio jitter buffer | video freezes | video received |
+|---|---|---|---|---|
+| natter (5 runs) | 0 | 65–74 ms | 0 | 180p and 360p, 20 fps (all the camera sends) |
+| LiveKit (5 runs) | 0 once, else 0.5–2.8% | 179–228 ms | 0 once, else 5–11 (3.8–12 s) | 720p at 6–8 fps |
+| natter, no microphone (2) | | | 0, and 2 (0.6 s) | 180p and 360p, 20 fps |
+| LiveKit, no microphone (2) | | | 0 | 720p at 7.5 fps |
+
+LiveKit keeps the 720p layer and drops frame rate (forwarding fewer
+temporal layers) to fit its estimate, which then leaves no room for the
+audio: with the microphone, audio waits up to 200 ms in the full queue
+(p99 of its queueing at the bottleneck, against natter's 25–45 ms) and is
+dropped, and video freezes. natter budgets audio at its measured rate
+before allocating video, picks a smaller spatial layer and keeps every
+frame. Raw results in
+[`data/2026-10-22/congestion/with-audio`](data/2026-10-22/congestion/with-audio)
+(`natter-load`) and [`data/2026-10-22/congestion/chrome`](data/2026-10-22/congestion/chrome)
+(Chrome).
 
 **How it works** (`crates/server/src/livekit/allocator.rs`):
 
@@ -227,7 +294,10 @@ its probes and keyframes cost latency LiveKit doesn't pay by staying on
    throughput while application-limited, so after a probe shows room it
    sinks back before an upgrade's hold is over. Upgrades use the highest
    estimate since the last congestion (10 s), as LiveKit commits a
-   probe's result.
+   probe's result. A step is taken only once that peak reaches the step's
+   probe goal (usage + 120% of the step, at least + 200 kbit/s), as
+   LiveKit's probe succeeds only at its goal, and not while the current
+   estimate is below what is sent (GCC only goes there on overuse).
 4. **One step at a time, with backoff.** One layer per report interval
    plus round trip; after an upgrade or probe that brought congestion,
    the next waits 3 s × 1.5ⁿ (LiveKit's probe regulator), and no probing
@@ -259,7 +329,10 @@ its probes and keyframes cost latency LiveKit doesn't pay by staying on
 | Loss window | 1 s | chosen (one report interval) |
 | Allocation interval | 100 ms | chosen (housekeeping tick) |
 
-Raw results in [`data/2026-10-18/congestion-grid`](data/2026-10-18/congestion-grid)
+Raw results in [`data/2026-10-22/congestion`](data/2026-10-22/congestion)
+(`grid`: the whole grid before (`base`) and after (`new`) the upgrade
+margin, two rounds; `rtt150-1000`: twelve more runs of that cell) and
+[`data/2026-10-18/congestion-grid`](data/2026-10-18/congestion-grid)
 (`baseline`: LiveKit and natter before this work; `detector`,
 `detector-audio`: natter now; `final`, `final-steps`, `audio`: before
 the TWCC detector). To reproduce a cell:
@@ -305,14 +378,15 @@ natter plans when, is [`../feature-parity.md`](../feature-parity.md).
 | Active speakers, connection quality | yes (LiveKit's algorithms) | yes |
 | Data channels (reliable, lossy) | yes | yes |
 | Resume and ICE restart | yes | yes |
-| Video: VP8, H.264, VP9, AV1, H.265 | yes (single layer per subscriber) | yes |
-| Simulcast layer choice, SVC, congestion control | not yet ([plan](../livekit/PARITY.md)) | yes |
-| Congestion control | not yet | yes |
-| TCP and TURN fallback | not yet | yes |
-| Server API (RoomService), webhooks | not yet | yes |
-| WHIP ingest | not yet | yes |
-| Egress, ingress, SIP, agents | no | yes (separate services) |
-| Multi-node | no | yes (Redis) |
+| Video: VP8, H.264, VP9, AV1, H.265 | yes | yes |
+| Simulcast, dynacast, SVC (VP9, AV1) | yes | yes |
+| Congestion control (TWCC, REMB) | yes | yes |
+| TCP and TURN fallback | yes (ICE/TCP on one port, embedded TURN and TURN/TLS) | yes |
+| Server API (RoomService), webhooks | yes | yes |
+| WHIP ingest | yes | yes |
+| Agent dispatch | yes | yes |
+| Egress, ingress, SIP | no | yes (separate services) |
+| Multi-node | yes (Redis, a room on one node; no Redis TLS, Sentinel or Cluster yet) | yes (Redis) |
 | Uses every core | yes, a room stays on one | yes |
 | Accounts and web app included | yes (passkeys, invites) | no (bring your own) |
 
@@ -345,22 +419,22 @@ Why these, how each is driven and what keeps the comparison fair:
   is started fresh for each run, and the servers alternate (natter,
   LiveKit, natter, LiveKit), because the same build varies by up to a
   quarter between sessions on a busy desktop.
-- **Servers:** natter at `9eeca41` with its defaults (one engine per
+- **Servers:** natter at `24932f0` with its defaults (one engine per
   core); LiveKit `livekit/livekit-server:v1.13.10` in Docker with host
   networking, `--dev`.
-- **The load generator's own CPU** was 7–145% of a core, on cores the
+- **The load generator's own CPU** was 7–147% of a core, on cores the
   servers weren't using up.
 
-The packet-loss and str0m chat runs were made earlier the same day, before
-the setup fixes, which don't touch forwarding.
-
-Raw results (one JSON and summary per run) are in
-[`data/2026-10-17`](data/2026-10-17). To reproduce:
+The natter vs LiveKit runs are from 2026-10-22, in
+[`data/2026-10-22`](data/2026-10-22). The packet-loss and str0m chat runs
+are older, from 2026-10-17 at `9eeca41`, in
+[`data/2026-10-17`](data/2026-10-17), as are the first natter vs LiveKit
+runs. Each run has one JSON and a summary. To reproduce:
 
 ```sh
 cargo build --release -p natter-server -p natter-load
 LOAD_ARGS="--warmup 5s --duration 20s" bench/compare.sh 60 2 natter:16 livekit
-bench/charts.py docs/benchmarks/data/2026-10-17 docs/benchmarks/img   # needs matplotlib
+bench/charts.py docs/benchmarks/data/2026-10-22 docs/benchmarks/img   # needs matplotlib
 ```
 
 LiveKit's own load tester (`bench/lk-bench.sh`, `lk load-test`) gives the

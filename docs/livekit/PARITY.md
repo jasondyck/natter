@@ -20,11 +20,25 @@ Reference material in this directory, all from the v1.13.10 tag and the
 Wire types come from the `livekit-protocol` crate 0.8.1, whose protos are
 identical to the server's pinned ones.
 
-## Status and next steps (2026-10-19)
+## Status and next steps (2026-10-22)
 
 All phases are done (1-9), apart from the open items below and under each
-phase. Merged on master through #28 (multi-node). New work branches from
-master.
+phase. New work branches from master.
+
+**Since phase 9** (pull requests #2-#9 of this repository):
+- LiveKit mismatches fixed (below).
+- Running as Stoat's voice server: mute webhooks, a writable `/data` in
+  the image, one ICE/TCP port shared by all engines (Stoat publishes only
+  7881), HTTP on the config's port in Docker. Against Stoat's LiveKit
+  (v1.9.14) at 100 audio rooms: 106% of a core against 164-172%, 530 MiB
+  against 2.4 GiB.
+- Joins: engines pinned to a CPU each, fill 120 participants before the
+  next engine is used (was 250), leaves reach the room at once.
+- Forwarding CPU: SCTP not walked when idle, `recvmmsg`/`sendmmsg` with
+  UDP GSO for runs to one address, SRTP on aws-lc in aws-lc builds, and
+  str0m releasing written packets without a full timeout (#7, #8): about
+  a quarter less CPU per forwarded audio packet and half per video
+  packet.
 
 **LiveKit mismatches** (`bench/e2e/sstate.mjs`, `shutdown.mjs`,
 `perms.mjs`, each run against both servers):
@@ -76,8 +90,6 @@ Timing each stage found:
   the token check, as LiveKit's.
 
 **Next:** the open items, in order:
-   - Congestion control at 1 Mbit/s on a 150 ms path: p99 285 ms
-     against LiveKit's 196 ms.
    - Temporal layers by `fps`.
    - DD rewrite (`DDForwarder`).
    - Stream trackers as LiveKit's.
@@ -85,11 +97,12 @@ Timing each stage found:
      (audio publications with more than one codec, which natter doesn't
      take yet). Of LiveKit's SDKs only the Go one (`server-sdk-go`) acts on
      it, publishing the backup codec asked for; the JS SDK ignores it.
-   - A Chrome test under a real bottleneck.
    - UDP-unstable fallback.
    - WHEP.
    - Multi-node: Redis TLS/Sentinel/Cluster, draining that waits for
      rooms, several replicas on Kubernetes (UDP ports per pod).
+   - Forwarding CPU: after #8, forwarding video at 15 rooms is about half
+     kernel send path and a fifth str0m's `poll_output`.
 
 **How each piece was checked.** The JS SDK scenarios since #21, and the
 Python agent scenarios, are in `bench/e2e/` (`setup.sh`, `run.sh
@@ -310,12 +323,18 @@ track and LOW for the other, no loss.
       delay, loss, delivered rate; vendored `Event::TwccFeedback`): when
       the link shrinks, a third of LiveKit's frame loss (3–4% vs 9–10%),
       undecodable frames well under, lower p99
-- [ ] 1 Mbit/s on a 150 ms path: p99 ~285 ms against LiveKit's 196
-      (natter runs one track on `h`, LiveKit stays on `q`)
+- [x] 1 Mbit/s on a 150 ms path: p99 196–215 ms (median 204) against
+      LiveKit's 196, was ~285: upgrades wait for the probe goal and not
+      while the estimate is below usage. A grace after a congesting probe
+      (keep the layers, as LiveKit's committed capacity) was tried and
+      made it worse (p99 ~330 ms): the queue it left didn't drain
 - [ ] Unmanaged (single-layer) screen shares exempt, as LiveKit; temporal
       layers; per-track priority (unused by LiveKit 1.13.10 too)
-- [ ] Not browser-tested under a real bottleneck (Chrome's network
-      throttling doesn't touch WebRTC; would need tc/netem)
+- [x] Browser-tested under a bottleneck: `bench/e2e/thin` (Chrome on both
+      ends through a shaping router in network namespaces, no root). At
+      1 Mbit/s and 150 ms natter keeps audio clean and video unfrozen at
+      a lower layer; LiveKit holds 720p at 6–8 fps and its audio queues
+      and drops behind it (docs/benchmarks, "With audio on the same link")
 
 ### 6. SVC and codec fallback
 
