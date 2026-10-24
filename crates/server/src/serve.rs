@@ -302,10 +302,7 @@ fn size_socket_buffers(socket: &UdpSocket) {
 }
 
 /// natter's own TURN server, if configured, relaying to the engines.
-fn start_turn(
-    config: &Settings,
-    shards: &[livekit::engine::Shard],
-) -> Result<Option<turn::Turn>> {
+fn start_turn(config: &Settings, shards: &[livekit::engine::Shard]) -> Result<Option<turn::Turn>> {
     let Some(port) = config.turn_port else {
         if config.turn_tls.is_some() {
             bail!("NATTER_TURN_TLS needs NATTER_TURN_PORT");
