@@ -378,9 +378,9 @@ const RIDS: [&str; 3] = ["q", "h", "f"];
 /// A subscriber's highest layer when it asks for no limit.
 pub const ANY_LAYER: u8 = u8::MAX;
 
-/// Requested sizes within this much of a layer's are served by it
-/// (LiveKit's `layerSelectionTolerance`).
-const SIZE_TOLERANCE: f64 = 0.9;
+/// Requested sizes and frame rates within this much of a layer's are
+/// served by it (LiveKit's `layerSelectionTolerance`).
+const LAYER_TOLERANCE: f64 = 0.9;
 
 /// A track's layers as `TrackInfo` carries them: one per quality, lowest
 /// first, with spatial index and rid. A track with no layers (a single
@@ -459,7 +459,7 @@ pub fn spatial_for_size(ladder: &[lk::VideoLayer], width: u32, height: u32) -> u
     }
     ladder
         .iter()
-        .find(|l| f64::from(size(l)) >= f64::from(wanted) * SIZE_TOLERANCE)
+        .find(|l| f64::from(size(l)) >= f64::from(wanted) * LAYER_TOLERANCE)
         .map_or(ANY_LAYER, |l| l.spatial_layer as u8)
 }
 
@@ -487,10 +487,20 @@ pub struct Layer {
     pub bytes: u64,
     pub window_start: Instant,
     pub bitrate: u32,
+    /// Frames begun since `window_start` per temporal layer, and the frame
+    /// rate of the last whole window up to each temporal layer (0 for
+    /// layers not seen).
+    frames: [u32; TEMPORAL_LAYERS],
+    pub fps: [f32; TEMPORAL_LAYERS],
+    /// A simulcast stream's dependency descriptors (its temporal layers).
+    pub dd: super::dd::Stream,
 }
 
-/// How long a layer's bitrate is averaged over.
+/// How long a layer's bitrate and frame rates are averaged over.
 const RATE_WINDOW: Duration = Duration::from_secs(1);
+
+/// Temporal layers told apart, as LiveKit (`DefaultMaxLayerTemporal` 3).
+pub const TEMPORAL_LAYERS: usize = 4;
 
 impl Layer {
     pub fn new(rid: Option<Rid>, spatial: u8, now: Instant) -> Self {
@@ -502,6 +512,9 @@ impl Layer {
             bytes: 0,
             window_start: now,
             bitrate: 0,
+            frames: [0; TEMPORAL_LAYERS],
+            fps: [0.0; TEMPORAL_LAYERS],
+            dd: Default::default(),
         }
     }
 
@@ -509,17 +522,47 @@ impl Layer {
         now.duration_since(self.last_seen) < LAYER_TIMEOUT
     }
 
-    /// Counts a packet of `len` payload bytes, and its headers.
-    pub fn count(&mut self, len: usize, now: Instant) {
+    /// Counts a packet of `len` payload bytes, and its headers; `frame` is
+    /// the temporal layer of the frame it begins, if it begins one.
+    pub fn count(&mut self, len: usize, frame: Option<u8>, now: Instant) {
         self.last_seen = now;
         self.bytes += len as u64 + super::allocator::PACKET_OVERHEAD;
+        if let Some(t) = frame {
+            self.frames[usize::from(t).min(TEMPORAL_LAYERS - 1)] += 1;
+        }
         let elapsed = now.duration_since(self.window_start);
         if elapsed >= RATE_WINDOW {
-            self.bitrate = (self.bytes * 8 * 1000 / elapsed.as_millis().max(1) as u64) as u32;
+            let ms = elapsed.as_millis().max(1) as u64;
+            self.bitrate = (self.bytes * 8 * 1000 / ms) as u32;
             self.bytes = 0;
+            let mut frames = 0;
+            for t in 0..TEMPORAL_LAYERS {
+                frames += self.frames[t];
+                self.fps[t] = if self.frames[t] == 0 {
+                    0.0
+                } else {
+                    frames as f32 * 1000.0 / ms as f32
+                };
+            }
+            self.frames = [0; TEMPORAL_LAYERS];
             self.window_start = now;
         }
     }
+}
+
+/// The temporal layer that serves a subscriber asking for `fps` frames a
+/// second from a layer with these frame rates: the lowest whose rate is
+/// within 90% of it, as LiveKit's `GetTemporalLayerForSpatialFps`; all of
+/// them when none is, or before any were measured, or for no limit (0).
+pub fn temporal_for_fps(rates: &[f32; TEMPORAL_LAYERS], fps: u32) -> u8 {
+    let wanted = fps as f32 * LAYER_TOLERANCE as f32;
+    if fps == 0 {
+        return ANY_LAYER;
+    }
+    rates
+        .iter()
+        .position(|&r| r > 0.0 && wanted <= r)
+        .map_or(ANY_LAYER, |t| t as u8)
 }
 
 /// The layer to follow for a subscriber wanting at most `max`: the
@@ -643,6 +686,223 @@ pub fn svc_select(
     SvcChoice {
         forward,
         want_keyframe,
+    }
+}
+
+/// The fields of a VP8 payload descriptor (RFC 7741 §4.2) that temporal
+/// layers need, and where they are, to rewrite them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Vp8Descriptor {
+    /// S=1 in partition 0: the packet begins a frame.
+    pub start: bool,
+    /// PictureID, its offset in the payload and whether it is 15 bits.
+    pub picture_id: Option<(u16, usize, bool)>,
+    /// TL0PICIDX and its offset.
+    pub tl0: Option<(u8, usize)>,
+    /// The TID/Y/KEYIDX byte's offset, and its fields (TID only with T=1,
+    /// KEYIDX only with K=1).
+    pub tk: Option<usize>,
+    pub tid: Option<u8>,
+    pub layer_sync: bool,
+    pub key_idx: Option<u8>,
+}
+
+pub fn vp8_descriptor(p: &[u8]) -> Option<Vp8Descriptor> {
+    let b0 = *p.first()?;
+    let mut d = Vp8Descriptor {
+        start: b0 & 0x10 != 0 && b0 & 0x07 == 0,
+        picture_id: None,
+        tl0: None,
+        tk: None,
+        tid: None,
+        layer_sync: false,
+        key_idx: None,
+    };
+    if b0 & 0x80 == 0 {
+        return Some(d);
+    }
+    let x = *p.get(1)?;
+    let mut at = 2;
+    if x & 0x80 != 0 {
+        let m = *p.get(at)?;
+        d.picture_id = Some(if m & 0x80 != 0 {
+            let id = u16::from_be_bytes([m & 0x7f, *p.get(at + 1)?]);
+            (id, at, true)
+        } else {
+            (u16::from(m), at, false)
+        });
+        at += if m & 0x80 != 0 { 2 } else { 1 };
+    }
+    if x & 0x40 != 0 {
+        d.tl0 = Some((*p.get(at)?, at));
+        at += 1;
+    }
+    if x & 0x30 != 0 {
+        let b = *p.get(at)?;
+        d.tk = Some(at);
+        if x & 0x20 != 0 {
+            d.tid = Some(b >> 6);
+            d.layer_sync = b & 0x20 != 0;
+        }
+        if x & 0x10 != 0 {
+            d.key_idx = Some(b & 0x1f);
+        }
+    }
+    Some(d)
+}
+
+/// The payload with PictureID, TL0PICIDX and KEYIDX replaced (each kept
+/// at its width), sharing nothing with the original.
+pub fn vp8_rewrite(p: &[u8], d: &Vp8Descriptor, ids: Vp8Ids) -> Arc<[u8]> {
+    let mut out = p.to_vec();
+    if let Some((_, at, long)) = d.picture_id {
+        if long {
+            out[at] = 0x80 | (ids.picture_id >> 8) as u8 & 0x7f;
+            out[at + 1] = ids.picture_id as u8;
+        } else {
+            out[at] = ids.picture_id as u8 & 0x7f;
+        }
+    }
+    if let Some((_, at)) = d.tl0 {
+        out[at] = ids.tl0;
+    }
+    if let (Some(at), Some(_)) = (d.tk, d.key_idx) {
+        out[at] = out[at] & 0xe0 | ids.key_idx & 0x1f;
+    }
+    out.into()
+}
+
+/// The picture numbering a VP8 subscriber sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Vp8Ids {
+    pub picture_id: u16,
+    pub tl0: u8,
+    pub key_idx: u8,
+}
+
+/// Pictures a VP8 subscriber remembers deciding, for their later packets.
+const VP8_RECENT: usize = 32;
+
+/// A VP8 subscriber's temporal layer and picture numbering, as LiveKit's
+/// VP8 temporal layer selector and munger (`temporallayerselector/vp8.go`,
+/// `codecmunger/vp8.go`). Pictures of temporal layers above its limit are
+/// dropped and taken out of the PictureID sequence, so the decoder sees no
+/// gap; across a simulcast switch PictureID, TL0PICIDX and KEYIDX carry on
+/// from the last ones sent.
+#[derive(Debug, Clone)]
+pub struct Vp8Down {
+    /// The temporal layer it gets now.
+    current: u8,
+    /// Subtracted from the publisher's numbers.
+    offsets: Vp8Ids,
+    /// The last numbers sent (as the subscriber sees them).
+    last: Option<Vp8Ids>,
+    /// The newest PictureID seen (the publisher's).
+    newest: Option<u16>,
+    /// Recent pictures: PictureID + 1 (0: none), and the PictureID offset
+    /// they went out with (None: dropped), by PictureID modulo the size.
+    recent: [(u16, Option<u16>); VP8_RECENT],
+}
+
+impl Default for Vp8Down {
+    fn default() -> Self {
+        Vp8Down {
+            current: 0,
+            offsets: Vp8Ids::default(),
+            last: None,
+            newest: None,
+            recent: [(0, None); VP8_RECENT],
+        }
+    }
+}
+
+/// PictureIDs are 15 bits.
+const PICTURE_ID_MASK: u16 = 0x7fff;
+
+impl Vp8Down {
+    /// Starts on a stream (a layer) at its keyframe `d`: carries on from
+    /// the numbers last sent, if any.
+    pub fn restart(&mut self, d: &Vp8Descriptor, max_temporal: u8) {
+        let ids = d.ids();
+        self.offsets = match self.last {
+            Some(last) => Vp8Ids {
+                picture_id: ids.picture_id.wrapping_sub(last.picture_id).wrapping_sub(1)
+                    & PICTURE_ID_MASK,
+                tl0: ids.tl0.wrapping_sub(last.tl0).wrapping_sub(1),
+                key_idx: ids.key_idx.wrapping_sub(last.key_idx).wrapping_sub(1) & 0x1f,
+            },
+            None => Vp8Ids::default(),
+        };
+        self.current = max_temporal;
+        self.newest = None;
+        self.recent = [(0, None); VP8_RECENT];
+    }
+
+    /// Decides one packet for a subscriber limited to `max_temporal`: None
+    /// to drop it, else the numbers it goes out with. A picture is decided
+    /// at its first packet, and its other packets follow. The layer goes up
+    /// at a keyframe, or one at a time at a layer sync frame of the next
+    /// layer; down after the end of a frame.
+    pub fn select(
+        &mut self,
+        d: &Vp8Descriptor,
+        keyframe: bool,
+        marker: bool,
+        max_temporal: u8,
+    ) -> Option<Vp8Ids> {
+        let ids = d.ids();
+        let pid = ids.picture_id;
+        let slot = usize::from(pid) % VP8_RECENT;
+        let offset = if self.recent[slot].0 == pid + 1 {
+            self.recent[slot].1
+        } else if self
+            .newest
+            .is_some_and(|n| n.wrapping_sub(pid) & PICTURE_ID_MASK < 0x4000)
+        {
+            // Older than any remembered: it can't be numbered.
+            return None;
+        } else {
+            self.newest = Some(pid);
+            let tid = d.tid.unwrap_or(0);
+            if self.current < max_temporal {
+                if keyframe && tid <= max_temporal {
+                    self.current = max_temporal;
+                } else if tid == self.current + 1 && d.start && d.layer_sync {
+                    self.current = tid;
+                }
+            }
+            let offset = if tid <= self.current {
+                Some(self.offsets.picture_id)
+            } else {
+                self.offsets.picture_id = self.offsets.picture_id.wrapping_add(1);
+                None
+            };
+            self.recent[slot] = (pid + 1, offset);
+            offset
+        };
+        if marker && self.current > max_temporal {
+            self.current = max_temporal;
+        }
+        let out = Vp8Ids {
+            picture_id: pid.wrapping_sub(offset?) & PICTURE_ID_MASK,
+            tl0: ids.tl0.wrapping_sub(self.offsets.tl0),
+            key_idx: ids.key_idx.wrapping_sub(self.offsets.key_idx) & 0x1f,
+        };
+        if self.newest == Some(pid) {
+            self.last = Some(out);
+        }
+        Some(out)
+    }
+}
+
+impl Vp8Descriptor {
+    /// The publisher's numbering.
+    pub fn ids(&self) -> Vp8Ids {
+        Vp8Ids {
+            picture_id: self.picture_id.map_or(0, |(id, _, _)| id),
+            tl0: self.tl0.map_or(0, |(i, _)| i),
+            key_idx: self.key_idx.unwrap_or(0),
+        }
     }
 }
 
@@ -932,5 +1192,170 @@ mod tests {
             let c = svc_select(&s, all, &f, false, false, (0, 2), &mut low);
             assert_eq!(c.forward.is_some(), f.spatial == 0, "{d}");
         }
+    }
+
+    /// A VP8 packet with PictureID (15 bits), TL0PICIDX, TID/Y and KEYIDX.
+    fn vp8(pid: u16, tl0: u8, tid: u8, sync: bool, start: bool) -> Vec<u8> {
+        let s = if start { 0x10 } else { 0 };
+        let tk = tid << 6 | u8::from(sync) << 5 | 3;
+        vec![
+            0x80 | s,
+            0xf0,
+            0x80 | (pid >> 8) as u8,
+            pid as u8,
+            tl0,
+            tk,
+            0xaa,
+        ]
+    }
+
+    #[test]
+    fn vp8_descriptor_rewritten() {
+        let p = vp8(0x1234, 9, 2, true, true);
+        let d = vp8_descriptor(&p).unwrap();
+        assert!(d.start && d.layer_sync);
+        assert_eq!((d.tid, d.key_idx), (Some(2), Some(3)));
+        assert_eq!(
+            d.ids(),
+            Vp8Ids {
+                picture_id: 0x1234,
+                tl0: 9,
+                key_idx: 3
+            }
+        );
+        let ids = Vp8Ids {
+            picture_id: 0x0102,
+            tl0: 200,
+            key_idx: 31,
+        };
+        let out = vp8_rewrite(&p, &d, ids);
+        let e = vp8_descriptor(&out).unwrap();
+        assert_eq!(e.ids(), ids);
+        assert_eq!((e.tid, e.layer_sync, out[6]), (Some(2), true, 0xaa));
+        // Without the X byte there is nothing to number.
+        assert_eq!(vp8_descriptor(&[0x10, 0x00]).unwrap().picture_id, None);
+    }
+
+    /// L1T3: TIDs 0 2 1 2 per four pictures; TL0PICIDX counts TID 0.
+    fn l1t3(first: u16, n: u16) -> Vec<(Vec<u8>, bool)> {
+        (0..n)
+            .map(|k| {
+                let tid = [0, 2, 1, 2][usize::from(k % 4)];
+                let tl0 = (k / 4) as u8;
+                (vp8(first + k, tl0, tid, tid > 0, true), k == 0)
+            })
+            .collect()
+    }
+
+    fn run(down: &mut Vp8Down, pkts: &[(Vec<u8>, bool)], max: u8) -> Vec<(u16, u8)> {
+        pkts.iter()
+            .filter_map(|(p, key)| {
+                let d = vp8_descriptor(p).unwrap();
+                down.select(&d, *key, true, max)
+                    .map(|o| (o.picture_id, o.tl0))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn vp8_temporal_layers_dropped_and_renumbered() {
+        let pkts = l1t3(100, 8);
+        for (max, want) in [
+            (0, vec![(100, 0), (101, 1)]),
+            (1, vec![(100, 0), (101, 0), (102, 1), (103, 1)]),
+            (
+                ANY_LAYER,
+                (0..8).map(|k| (100 + k, (k / 4) as u8)).collect(),
+            ),
+        ] {
+            let mut down = Vp8Down::default();
+            let d = vp8_descriptor(&pkts[0].0).unwrap();
+            down.restart(&d, max);
+            assert_eq!(run(&mut down, &pkts, max), want, "max {max}");
+        }
+    }
+
+    #[test]
+    fn vp8_temporal_switches() {
+        let pkts = l1t3(0, 16);
+        let mut down = Vp8Down::default();
+        down.restart(&vp8_descriptor(&pkts[0].0).unwrap(), 0);
+        assert_eq!(run(&mut down, &pkts[..4], 0).len(), 1);
+        // Up: at the next TID 1 sync frame (picture 6), then TID 2 (7).
+        let up: Vec<u16> = run(&mut down, &pkts[4..12], ANY_LAYER)
+            .iter()
+            .map(|o| o.0)
+            .collect();
+        assert_eq!(up, [1, 2, 3, 4, 5, 6, 7]);
+        // Down: a dropped picture's later packets go too, and are counted
+        // once.
+        let p = vp8(12 + 1, 3, 2, true, false);
+        let d = vp8_descriptor(&p).unwrap();
+        assert_eq!(
+            down.select(&vp8_descriptor(&pkts[12].0).unwrap(), false, true, 0)
+                .map(|o| o.picture_id),
+            Some(8)
+        );
+        assert_eq!(
+            down.select(&vp8_descriptor(&pkts[13].0).unwrap(), false, false, 0),
+            None
+        );
+        assert_eq!(down.select(&d, false, true, 0), None);
+        let last = run(&mut down, &pkts[14..], 0);
+        assert_eq!(last, []);
+        let next = l1t3(16, 1);
+        assert_eq!(run(&mut down, &next, 0)[0].0, 9);
+    }
+
+    #[test]
+    fn vp8_numbering_carries_over_a_layer_switch() {
+        let mut down = Vp8Down::default();
+        let a = l1t3(100, 4);
+        down.restart(&vp8_descriptor(&a[0].0).unwrap(), ANY_LAYER);
+        assert_eq!(run(&mut down, &a, ANY_LAYER).last(), Some(&(103, 0)));
+        // Another layer's keyframe, with its own numbers.
+        let b = l1t3(5000, 2);
+        let k = vp8(5000, 77, 0, false, true);
+        down.restart(&vp8_descriptor(&k).unwrap(), ANY_LAYER);
+        let mut b = b;
+        b[0].0 = k;
+        b[1].0[4] = 77;
+        assert_eq!(run(&mut down, &b, ANY_LAYER), [(104, 1), (105, 1)]);
+    }
+
+    #[test]
+    fn temporal_layer_for_fps() {
+        let rates = [7.5, 15.0, 30.0, 0.0];
+        for (fps, want) in [
+            (8, 0),
+            (10, 1),
+            (15, 1),
+            (30, 2),
+            (60, ANY_LAYER),
+            (0, ANY_LAYER),
+        ] {
+            assert_eq!(temporal_for_fps(&rates, fps), want, "{fps} fps");
+        }
+        assert_eq!(temporal_for_fps(&[0.0; 4], 5), ANY_LAYER);
+    }
+
+    #[test]
+    fn layer_frame_rates() {
+        let t0 = Instant::now();
+        let mut l = Layer::new(None, 0, t0);
+        // 30 frames a second in L1T3, two packets each.
+        for k in 0..32u32 {
+            let at = t0 + Duration::from_micros(u64::from(k) * 33_334);
+            let tid = [0, 2, 1, 2][k as usize % 4];
+            l.count(1000, Some(tid), at);
+            l.count(1000, None, at);
+        }
+        let [a, b, c, d] = l.fps;
+        assert!(
+            (7.0..8.5).contains(&a) && (14.0..16.5).contains(&b),
+            "{:?}",
+            l.fps
+        );
+        assert!((29.0..32.0).contains(&c) && d == 0.0, "{:?}", l.fps);
     }
 }
