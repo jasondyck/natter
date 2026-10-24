@@ -34,7 +34,7 @@ const bob = await join('bob', false);
 await twirp('CreateRoom', { name: 'empty', empty_timeout: 300 });
 await sleep(3000);
 after = true;
-const term = () => (process.env.SERVER === 'lk' ? execSync('docker kill -s TERM natter-e2e-lk') : execSync('pkill -TERM -x natter-server'));
+const term = () => (process.env.SERVER === 'lk' ? execSync('docker kill -s TERM natter-e2e-lk') : process.kill(Number(process.env.NATTER_PID), 'SIGTERM'));
 term();
 await sleep(1500);
 if (process.env.SERVER === 'lk') term();

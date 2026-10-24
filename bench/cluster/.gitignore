@@ -2,3 +2,4 @@ a.yaml
 b.yaml
 *.log
 lt-*.txt
+pids
