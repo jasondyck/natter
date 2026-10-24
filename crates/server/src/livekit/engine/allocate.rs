@@ -15,6 +15,25 @@ use crate::livekit::cc_detect;
 use crate::livekit::rtc_config::Congestion;
 use crate::livekit::video;
 
+/// A layer's bitrate up to each temporal layer it sends, `rate` in all
+/// when its temporal layers aren't known (or measured yet).
+fn temporal_rates(l: &video::Layer, rate: u32) -> [Option<u32>; allocator::TEMPORAL] {
+    let mut rates = own_rates(l);
+    if rates.iter().all(Option::is_none) {
+        rates[0] = Some(rate.max(1));
+    }
+    rates
+}
+
+fn own_rates(l: &video::Layer) -> [Option<u32>; allocator::TEMPORAL] {
+    l.temporal_rates.map(|r| (r > 0).then_some(r))
+}
+
+/// The rate up to the highest temporal layer below `tl` that is sent.
+fn own_below(rates: &[Option<u32>; allocator::TEMPORAL], tl: usize) -> Option<u32> {
+    rates[..tl].iter().rev().find_map(|r| *r)
+}
+
 impl Engine {
     /// Allocates every subscriber not allocated for `allocator::INTERVAL`.
     pub(super) fn allocate_due(&mut self, now: Instant) {
@@ -59,16 +78,26 @@ impl Engine {
             if t.info.muted {
                 continue;
             }
-            let mut rates = [None; 3];
-            // SVC: a spatial layer costs itself and every layer below.
+            let mut rates = [[None; allocator::TEMPORAL]; allocator::SPATIAL];
+            let mut max_temporal = [video::ANY_LAYER; allocator::SPATIAL];
+            // SVC: a spatial layer costs itself and every layer below, each
+            // up to the same temporal layer.
             if let Some(svc) = &t.svc {
-                let mut sum = 0u32;
+                let mut sum = [0u32; allocator::TEMPORAL];
                 for l in &svc.spatial {
                     if !l.live(now) {
                         break;
                     }
-                    sum += l.bitrate;
-                    rates[usize::from(l.spatial)] = Some(sum.max(1));
+                    let s = usize::from(l.spatial);
+                    let own = temporal_rates(l, l.bitrate);
+                    for (tl, own) in own.iter().enumerate() {
+                        // A layer below without this temporal layer: its
+                        // highest below it.
+                        let r = own.or_else(|| own_below(&own_rates(l), tl));
+                        sum[tl] += r.unwrap_or(0);
+                        rates[s][tl] = own.map(|_| sum[tl].max(1));
+                    }
+                    max_temporal[s] = video::temporal_for_fps(&l.fps, d.fps);
                 }
             }
             for l in t.layers.iter().filter(|l| l.live(now) && t.svc.is_none()) {
@@ -79,15 +108,39 @@ impl Engine {
                     .iter()
                     .find(|x| x.spatial_layer == i32::from(s))
                     .map_or(0, |x| x.bitrate);
-                rates[usize::from(s)] = Some(allocator::layer_rate(l.bitrate, announced, s));
+                let rate = allocator::layer_rate(l.bitrate, announced, s);
+                rates[usize::from(s)] = temporal_rates(l, rate);
+                max_temporal[usize::from(s)] = video::temporal_for_fps(&l.fps, d.fps);
             }
-            if rates.iter().all(Option::is_none) {
+            if rates.iter().flatten().all(Option::is_none) {
                 continue;
+            }
+            // Fewer frames of the lowest spatial layer are worth it only
+            // where the alternative is a pause. Without pausing it keeps
+            // all it may have: the link carries at least that, and sending
+            // less leaves GCC's estimate to recover from a loss as slowly
+            // as the little acknowledged allows (str0m probes only while
+            // application-limited), so it stayed at a quarter of the frames.
+            if !p.allow_pause
+                && let Some(s) = rates.iter().position(|r| r.iter().any(Option::is_some))
+            {
+                let top = rates[s].iter().rposition(Option::is_some).unwrap_or(0);
+                let keep = top.min(usize::from(max_temporal[s]));
+                let keep = (0..=keep)
+                    .rev()
+                    .find(|&t| rates[s][t].is_some())
+                    .unwrap_or(top);
+                for (t, r) in rates[s].iter_mut().enumerate() {
+                    if t != keep {
+                        *r = None;
+                    }
+                }
             }
             keys.push(k);
             tracks.push(allocator::Track {
                 screen: t.info.source == lk::TrackSource::ScreenShare as i32,
                 max,
+                max_temporal,
                 rates,
             });
         }
@@ -221,17 +274,31 @@ impl Engine {
             .all(|&at| now.duration_since(at) >= wait);
         for (((&k, t), a), a_up) in keys.iter().zip(&tracks).zip(alloc).zip(alloc_up) {
             // Without pausing, a track nothing fits for gets its lowest.
-            let lowest = t.rates.iter().position(Option::is_some).map(|s| s as u8);
-            let floor = |a: Option<u8>| a.or(if p.allow_pause { None } else { lowest });
+            let lowest = t.lowest();
+            let floor =
+                |a: Option<allocator::Pick>| a.or(if p.allow_pause { None } else { lowest });
             let d = &mut p.downtracks[k];
+            let before = d.hold.applied.flatten();
             let was_paused = d.hold.applied == Some(None);
-            let change = d
-                .hold
-                .update(floor(a), floor(a_up), may_upgrade, congestion, wait, now);
-            // The link is dropping packets: stop the old layer now rather
-            // than flood it until the lower layer's keyframe; the picture
-            // holds until then.
-            if change == allocator::Change::Down && congestion == allocator::Congestion::Loss {
+            let next = allocator::next_step(t, before).map(|(p, _)| p);
+            let change = d.hold.update(
+                floor(a),
+                floor(a_up),
+                next,
+                may_upgrade,
+                congestion,
+                wait,
+                now,
+            );
+            // The link is dropping packets: stop the old spatial layer now
+            // rather than flood it until the lower one's keyframe; the
+            // picture holds until then. (Fewer temporal layers take effect
+            // at the next frame.)
+            let spatial = |p: Option<allocator::Pick>| p.map(|p| p.spatial);
+            if change == allocator::Change::Down
+                && congestion == allocator::Congestion::Loss
+                && spatial(d.hold.applied.flatten()) < spatial(before)
+            {
                 d.layer = None;
             }
             if change == allocator::Change::Up {
@@ -268,7 +335,7 @@ impl Engine {
         let mut step: Option<u64> = None;
         for (t, cap) in tracks.iter().zip(caps) {
             usage += allocator::usage_bps(t, cap);
-            wanted += allocator::usage_bps(t, Some(t.max));
+            wanted += allocator::wanted_bps(t);
             if let Some(next) = allocator::next_step_bps(t, cap) {
                 step = Some(step.map_or(next, |s| s.min(next)));
             }

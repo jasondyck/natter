@@ -294,11 +294,7 @@ impl Engine {
                 spatial: [0, 1, 2].map(|s| Layer::new(None, s, now)),
             });
             if let Some(f) = dd.and_then(|dd| svc.dd.parse(&dd.0)) {
-                svc.spatial[usize::from(f.spatial.min(2))].count(
-                    len,
-                    f.start.then_some(f.temporal),
-                    now,
-                );
+                svc.spatial[usize::from(f.spatial.min(2))].count(len, f.temporal, f.start, now);
                 svc_frame = svc.dd.structure.clone().map(|st| (f, st, svc.dd.active));
             }
         }
@@ -316,25 +312,26 @@ impl Engine {
         // then see rewritten.
         let mut layer_frame = None;
         let mut vp8 = None;
-        let frame = if svc_mode {
-            None
+        let (temporal, starts_frame) = if svc_mode {
+            (0, false)
         } else if let Some(f) = dd.and_then(|dd| layer.dd.parse(&dd.0)) {
-            let start = f.start.then_some(f.temporal);
+            let at = (f.temporal, f.start);
             layer_frame = layer
                 .dd
                 .structure
                 .clone()
                 .map(|st| (f, st, layer.dd.active));
-            start
+            at
         } else {
             vp8 = (codec == Codec::Vp8)
                 .then(|| video::vp8_descriptor(&pkt.payload))
                 .flatten()
                 .filter(|d| d.picture_id.is_some());
-            vp8.filter(|d| d.start).map(|d| d.tid.unwrap_or(0))
+            vp8.map_or((0, false), |d| (d.tid.unwrap_or(0), d.start))
         };
-        layer.count(len, frame, now);
+        layer.count(len, temporal, starts_frame, now);
         let rates = layer.fps;
+        let layer_spatial = layer.spatial;
         track.keyframe_seen |= keyframe;
         let resized = track.size_from_media
             && keyframe
@@ -452,7 +449,11 @@ impl Engine {
             let estimating = s.congestion != Congestion::Off
                 && (s.cc.estimate.is_some()
                     || s.joined_at.elapsed().is_ok_and(|e| e < ESTIMATE_GRACE));
-            let unallocated = if estimating { 0 } else { video::ANY_LAYER };
+            let unallocated = if estimating {
+                allocator::Pick::new(0, video::ANY_LAYER)
+            } else {
+                allocator::Pick::new(video::ANY_LAYER, video::ANY_LAYER)
+            };
             let (Some(max), Some(cap)) = (d.max_layer, d.hold.applied.unwrap_or(Some(unallocated)))
             else {
                 if d.max_layer.is_none() {
@@ -462,8 +463,20 @@ impl Engine {
                 d.svc = video::SvcDown::default();
                 continue;
             };
-            let target = targets[usize::from(max.min(cap).min(3))];
-            let max_temporal = video::temporal_for_fps(&rates, d.fps);
+            let spatial_cap = max.min(cap.spatial);
+            let target = targets[usize::from(spatial_cap.min(3))];
+            // Temporal layers: what its frame rate setting allows, and
+            // congestion control's cap where it forwards the capped spatial
+            // layer (a lower one gets all of its own).
+            let temporal_cap = |spatial: u8| {
+                if spatial < cap.spatial {
+                    video::ANY_LAYER
+                } else {
+                    cap.temporal
+                }
+            };
+            let max_temporal =
+                video::temporal_for_fps(&rates, d.fps).min(temporal_cap(layer_spatial));
             // Forwarding starts here from nothing (LiveKit's `IsResuming`).
             let mut layer_started = false;
             if d.layer != target {
@@ -500,9 +513,10 @@ impl Engine {
                 // A simulcast stream's are its temporal layers only.
                 let limit = match svc_rates {
                     Some(r) if svc_frame.is_some() => {
-                        let spatial = max.min(cap).min(2);
+                        let spatial = spatial_cap.min(2);
                         let rates = &r[usize::from(spatial)];
-                        (spatial, video::temporal_for_fps(rates, d.fps))
+                        let fps = video::temporal_for_fps(rates, d.fps);
+                        (spatial, fps.min(temporal_cap(spatial_cap)))
                     }
                     _ => (video::ANY_LAYER, max_temporal),
                 };

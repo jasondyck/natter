@@ -1,12 +1,14 @@
-//! Congestion control's allocation step: which simulcast layer of each video
-//! track a subscriber gets, given the bandwidth estimate for its link.
+//! Congestion control's allocation step: which spatial and temporal layer
+//! of each video track a subscriber gets, given the bandwidth estimate for
+//! its link.
 //!
 //! As LiveKit's stream allocator allocates all tracks
-//! (`docs/livekit/media.md` B.1): layer by layer, every track's lowest layer
-//! before anyone's next one, screen shares first, then tracks wanting more
-//! before tracks wanting less. A track nothing fits for gets no layer: it is
-//! paused if the subscriber allows that, else it gets its lowest layer
-//! anyway. Temporal layers are not allocated (all are forwarded).
+//! (`docs/livekit/media.md` B.1): layer by layer, spatial then temporal
+//! (every track's lowest spatial layer at each frame rate before anyone's
+//! next spatial layer), screen shares first, then tracks wanting more
+//! before tracks wanting less. A track nothing fits for gets no layer: it
+//! is paused if the subscriber allows that, else it gets its lowest layer
+//! anyway.
 
 use std::time::{Duration, Instant};
 
@@ -82,15 +84,66 @@ pub const PROBE_MIN_BPS: u64 = 200_000;
 /// index (LiveKit's camera presets at 720p).
 const DEFAULT_LAYER_BPS: [u32; 3] = [150_000, 500_000, 1_700_000];
 
+/// A spatial and temporal layer, ordered spatial first: every frame rate
+/// of a spatial layer comes below the next spatial layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Pick {
+    pub spatial: u8,
+    pub temporal: u8,
+}
+
+impl Pick {
+    pub const fn new(spatial: u8, temporal: u8) -> Self {
+        Pick { spatial, temporal }
+    }
+}
+
+/// Spatial and temporal layers told apart.
+pub const SPATIAL: usize = 3;
+pub const TEMPORAL: usize = crate::livekit::video::TEMPORAL_LAYERS;
+
 /// One video track as the allocator sees it.
 #[derive(Debug, Clone)]
 pub struct Track {
     /// Screen shares are allocated before cameras.
     pub screen: bool,
-    /// The highest spatial layer the subscriber's settings allow.
+    /// The highest spatial layer the subscriber's settings allow, and per
+    /// spatial layer the highest temporal layer (its frame rate setting).
     pub max: u8,
-    /// Bitrate of each spatial layer the publisher is sending now.
-    pub rates: [Option<u32>; 3],
+    pub max_temporal: [u8; SPATIAL],
+    /// What the publisher sends now: each spatial layer up to each
+    /// temporal layer (cumulative), None for layers it doesn't send. A
+    /// stream without temporal layers has only temporal layer 0.
+    pub rates: [[Option<u32>; TEMPORAL]; SPATIAL],
+}
+
+impl Track {
+    /// Its layers within its settings, lowest first.
+    fn layers(&self) -> impl Iterator<Item = (Pick, u32)> + '_ {
+        (0..SPATIAL as u8).flat_map(move |s| {
+            (0..TEMPORAL as u8).filter_map(move |t| {
+                let rate = self.rates[usize::from(s)][usize::from(t)]?;
+                Some((Pick::new(s, t), rate))
+            })
+        })
+    }
+
+    fn allowed(&self, p: Pick) -> bool {
+        p.spatial <= self.max && p.temporal <= self.max_temporal[usize::from(p.spatial)]
+    }
+
+    /// Its lowest layer.
+    pub fn lowest(&self) -> Option<Pick> {
+        self.layers().next().map(|(p, _)| p)
+    }
+
+    fn rate(&self, p: Pick) -> Option<u32> {
+        self.rates
+            .get(usize::from(p.spatial))?
+            .get(usize::from(p.temporal))
+            .copied()
+            .flatten()
+    }
 }
 
 /// The bitrate to assume for a layer: measured, else what the publisher
@@ -105,56 +158,82 @@ pub fn layer_rate(measured: u32, announced: u32, spatial: u8) -> u32 {
     }
 }
 
-/// The highest spatial layer each track gets within `budget_bps`, or None
-/// when not even its lowest fits.
-pub fn allocate(budget_bps: u64, tracks: &[Track]) -> Vec<Option<u8>> {
+/// The highest layer each track gets within `budget_bps`, or None when not
+/// even its lowest fits. Each step up costs more than the one before.
+pub fn allocate(budget_bps: u64, tracks: &[Track]) -> Vec<Option<Pick>> {
     let mut order: Vec<usize> = (0..tracks.len()).collect();
     order.sort_by_key(|&k| (!tracks[k].screen, std::cmp::Reverse(tracks[k].max)));
-    let mut alloc: Vec<Option<u8>> = vec![None; tracks.len()];
+    let mut alloc: Vec<Option<Pick>> = vec![None; tracks.len()];
     let mut left = budget_bps;
-    for spatial in 0..3u8 {
-        for &k in &order {
-            let t = &tracks[k];
-            let Some(rate) = t.rates[usize::from(spatial)] else {
-                continue;
-            };
-            if spatial > t.max {
-                continue;
-            }
-            let held = alloc[k].and_then(|s| t.rates[usize::from(s)]).unwrap_or(0);
-            let cost = u64::from(rate).saturating_sub(u64::from(held));
-            if cost <= left {
-                left -= cost;
-                alloc[k] = Some(spatial);
+    for spatial in 0..SPATIAL as u8 {
+        for temporal in 0..TEMPORAL as u8 {
+            let pick = Pick::new(spatial, temporal);
+            for &k in &order {
+                let t = &tracks[k];
+                let Some(rate) = t.rate(pick) else {
+                    continue;
+                };
+                if !t.allowed(pick) {
+                    continue;
+                }
+                // Only steps that cost more: a higher spatial layer at a
+                // lower frame rate can cost less than a lower one at all of
+                // them, and isn't better for it (LiveKit takes it).
+                let held = alloc[k].and_then(|a| t.rate(a));
+                if held.is_some_and(|h| rate <= h) {
+                    continue;
+                }
+                let cost = u64::from(rate) - u64::from(held.unwrap_or(0));
+                if cost <= left {
+                    left -= cost;
+                    alloc[k] = Some(pick);
+                }
             }
         }
     }
     alloc
 }
 
-/// What a track sends at a cap (None: paused): its highest live layer up to
-/// the cap, else its lowest (the forwarder's choice).
-pub fn usage_bps(t: &Track, cap: Option<u8>) -> u64 {
-    let Some(cap) = cap else {
-        return 0;
-    };
-    let live = |s: u8| t.rates[usize::from(s)].map(u64::from);
-    (0..=cap.min(2))
-        .rev()
-        .find_map(live)
-        .or_else(|| (0..3).find_map(live))
-        .unwrap_or(0)
+/// The layer a track is forwarded at a cap: its highest layer up to the cap
+/// (a higher spatial layer's frame rates come above every lower one's)
+/// within its frame rate setting, else its lowest (the forwarder's choice).
+pub fn forwarded(t: &Track, cap: Pick) -> Option<(Pick, u32)> {
+    t.layers()
+        .filter(|&(p, _)| p <= cap && p.temporal <= t.max_temporal[usize::from(p.spatial)])
+        .last()
+        .or_else(|| t.layers().next())
 }
 
-/// The cost of a track's next step up, if it is below what it wants: the
-/// next live layer above its cap, within its settings.
-pub fn next_step_bps(t: &Track, cap: Option<u8>) -> Option<u64> {
+/// What a track sends at the most its settings allow.
+pub fn wanted_bps(t: &Track) -> u64 {
+    t.layers()
+        .filter(|&(p, _)| t.allowed(p))
+        .last()
+        .map_or(0, |(_, r)| u64::from(r))
+}
+
+/// What a track sends at a cap (None: paused).
+pub fn usage_bps(t: &Track, cap: Option<Pick>) -> u64 {
+    cap.and_then(|c| forwarded(t, c))
+        .map_or(0, |(_, rate)| u64::from(rate))
+}
+
+/// A track's next layer up from a cap, within its settings, and what it
+/// costs on top.
+pub fn next_step(t: &Track, cap: Option<Pick>) -> Option<(Pick, u64)> {
     let now = usage_bps(t, cap);
-    let from = cap.map_or(0, |c| c.saturating_add(1));
-    (from..=t.max.min(2))
-        .find_map(|s| t.rates[usize::from(s)])
-        .map(|r| u64::from(r).saturating_sub(now))
-        .filter(|&d| d > 0)
+    let (at, _) = cap
+        .and_then(|c| forwarded(t, c))
+        .map_or((None, 0), |(p, r)| (Some(p), r));
+    t.layers()
+        .filter(|&(p, _)| t.allowed(p) && at.is_none_or(|a| p > a) && cap.is_none_or(|c| p > c))
+        .find(|&(_, r)| u64::from(r) > now)
+        .map(|(p, r)| (p, u64::from(r) - now))
+}
+
+/// The cost of a track's next step up, if it is below what it wants.
+pub fn next_step_bps(t: &Track, cap: Option<Pick>) -> Option<u64> {
+    next_step(t, cap).map(|(_, d)| d)
 }
 
 /// What to ask the bandwidth estimator for, which it probes towards with
@@ -209,7 +288,7 @@ pub enum Congestion {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Hold {
     /// The applied cap: None while nothing fits (paused, if allowed).
-    pub applied: Option<Option<u8>>,
+    pub applied: Option<Option<Pick>>,
     higher_since: Option<Instant>,
 }
 
@@ -225,12 +304,15 @@ impl Hold {
     /// Feeds a fresh allocation: `fits` from the current estimate (for
     /// going down), `fits_up` from the peak estimate since the last
     /// congestion, within `upgrade_budget` (for going up; see
-    /// `PEAK_WINDOW`). `may_upgrade` is false
-    /// while another of the subscriber's tracks went up within `hold`.
+    /// `PEAK_WINDOW`); `next` is the track's next layer up from the applied
+    /// cap. `may_upgrade` is false while another of the subscriber's tracks
+    /// went up within `hold`.
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
-        fits: Option<u8>,
-        fits_up: Option<u8>,
+        fits: Option<Pick>,
+        fits_up: Option<Pick>,
+        next: Option<Pick>,
         may_upgrade: bool,
         congestion: Congestion,
         hold: Duration,
@@ -256,7 +338,9 @@ impl Hold {
         if !may_upgrade || now.duration_since(since) < hold {
             return Change::None;
         }
-        let step = applied.map_or(0, |s| s.saturating_add(1));
+        let Some(step) = next else {
+            return Change::None;
+        };
         self.applied = Some(Some(step).min(fits_up));
         self.higher_since = None;
         Change::Up
@@ -267,22 +351,63 @@ impl Hold {
 mod tests {
     use super::*;
 
+    const ANY: u8 = u8::MAX;
+
+    fn p(spatial: u8, temporal: u8) -> Option<Pick> {
+        Some(Pick::new(spatial, temporal))
+    }
+
+    /// Three spatial layers, no temporal layers.
     fn camera(max: u8) -> Track {
+        let mut rates = [[None; TEMPORAL]; SPATIAL];
+        for (s, r) in [150_000, 500_000, 1_500_000].into_iter().enumerate() {
+            rates[s][0] = Some(r);
+        }
         Track {
             screen: false,
             max,
-            rates: [Some(150_000), Some(500_000), Some(1_500_000)],
+            max_temporal: [ANY; SPATIAL],
+            rates,
         }
+    }
+
+    /// Chrome's VP8 simulcast: three spatial layers in L1T3, each
+    /// temporal layer half the frames (and here half the bytes) of the
+    /// whole.
+    fn l1t3(max: u8) -> Track {
+        let mut t = camera(max);
+        for (s, r) in [150_000u32, 500_000, 1_500_000].into_iter().enumerate() {
+            t.rates[s] = [Some(r / 4), Some(r / 2), Some(r), None];
+        }
+        t
     }
 
     #[test]
     fn lowest_layers_first_then_up() {
         let tracks = [camera(2), camera(2), camera(2)];
-        assert_eq!(allocate(10_000_000, &tracks), [Some(2), Some(2), Some(2)]);
+        assert_eq!(allocate(10_000_000, &tracks), [p(2, 0), p(2, 0), p(2, 0)]);
         // 3 × 150k, then 3 × 350k more for h, then 1M more each for f.
-        assert_eq!(allocate(2_000_000, &tracks), [Some(1), Some(1), Some(1)]);
-        assert_eq!(allocate(2_600_000, &tracks), [Some(2), Some(1), Some(1)]);
-        assert_eq!(allocate(400_000, &tracks), [Some(0), Some(0), None]);
+        assert_eq!(allocate(2_000_000, &tracks), [p(1, 0), p(1, 0), p(1, 0)]);
+        assert_eq!(allocate(2_600_000, &tracks), [p(2, 0), p(1, 0), p(1, 0)]);
+        assert_eq!(allocate(400_000, &tracks), [p(0, 0), p(0, 0), None]);
+    }
+
+    #[test]
+    fn temporal_layers_within_each_spatial_layer() {
+        let tracks = [l1t3(2), l1t3(2)];
+        // Each spatial layer at every frame rate before the next one.
+        assert_eq!(allocate(80_000, &tracks), [p(0, 0), p(0, 0)]);
+        assert_eq!(allocate(160_000, &tracks), [p(0, 1), p(0, 1)]);
+        assert_eq!(allocate(300_000, &tracks), [p(0, 2), p(0, 2)]);
+        assert_eq!(allocate(600_000, &tracks), [p(1, 1), p(1, 1)]);
+        // 720p at a quarter of the frames costs less than 360p at all of
+        // them: not a step up.
+        assert_eq!(allocate(1_000_000, &tracks), [p(1, 2), p(1, 2)]);
+        assert_eq!(allocate(1_800_000, &tracks), [p(2, 1), p(2, 1)]);
+        // A frame rate setting caps the temporal layer of every spatial one.
+        let mut capped = l1t3(2);
+        capped.max_temporal = [1; SPATIAL];
+        assert_eq!(allocate(10_000_000, &[capped]), [p(2, 1)]);
     }
 
     #[test]
@@ -290,32 +415,41 @@ mod tests {
         let mut screen = camera(2);
         screen.screen = true;
         let tracks = [camera(0), camera(2), screen];
-        assert_eq!(allocate(300_000, &tracks), [None, Some(0), Some(0)]);
-        assert_eq!(allocate(1_800_000, &tracks), [Some(0), Some(1), Some(1)]);
-        assert_eq!(allocate(2_900_000, &tracks), [Some(0), Some(1), Some(2)]);
+        assert_eq!(allocate(300_000, &tracks), [None, p(0, 0), p(0, 0)]);
+        assert_eq!(allocate(1_800_000, &tracks), [p(0, 0), p(1, 0), p(1, 0)]);
+        assert_eq!(allocate(2_900_000, &tracks), [p(0, 0), p(1, 0), p(2, 0)]);
     }
 
     #[test]
     fn skips_layers_not_sent() {
-        let only_f = Track {
-            rates: [None, None, Some(1_500_000)],
-            ..camera(2)
-        };
+        let mut only_f = camera(2);
+        only_f.rates[0][0] = None;
+        only_f.rates[1][0] = None;
         let one = std::slice::from_ref(&only_f);
         assert_eq!(allocate(1_000_000, one), [None]);
-        assert_eq!(allocate(2_000_000, one), [Some(2)]);
-        assert_eq!(usage_bps(&only_f, Some(0)), 1_500_000, "the lowest live");
-        assert_eq!(usage_bps(&camera(1), Some(1)), 500_000);
+        assert_eq!(allocate(2_000_000, one), [p(2, 0)]);
+        assert_eq!(usage_bps(&only_f, p(0, 0)), 1_500_000, "the lowest live");
+        assert_eq!(usage_bps(&camera(1), p(1, 0)), 500_000);
+        // A cap above the temporal layers sent is the top one.
+        assert_eq!(usage_bps(&l1t3(2), p(1, ANY)), 500_000);
     }
 
     #[test]
     fn probes_for_the_next_step_only() {
         let t = camera(2);
-        assert_eq!(usage_bps(&t, Some(0)), 150_000);
+        assert_eq!(usage_bps(&t, p(0, 0)), 150_000);
         assert_eq!(usage_bps(&t, None), 0);
-        assert_eq!(next_step_bps(&t, Some(0)), Some(350_000));
-        assert_eq!(next_step_bps(&t, Some(2)), None, "at what it wants");
-        assert_eq!(next_step_bps(&camera(0), Some(0)), None);
+        assert_eq!(next_step_bps(&t, p(0, 0)), Some(350_000));
+        assert_eq!(next_step_bps(&t, p(2, 0)), None, "at what it wants");
+        assert_eq!(next_step_bps(&camera(0), p(0, 0)), None);
+        assert_eq!(next_step(&t, None), Some((Pick::new(0, 0), 150_000)));
+        // With temporal layers the next step is the next frame rate, and
+        // from the top one the next spatial layer's lowest.
+        let t = l1t3(2);
+        // (360p at a quarter of the frames costs less than 180p at all of
+        // them, so it is no step up.)
+        assert_eq!(next_step(&t, p(0, 2)), Some((Pick::new(1, 1), 100_000)));
+        assert_eq!(next_step(&t, p(1, 0)), Some((Pick::new(1, 1), 125_000)));
         assert_eq!(probe_goal(300_000, Some(350_000)), 720_000);
         assert_eq!(probe_goal(300_000, Some(100_000)), 500_000, "at least 200k");
         assert_eq!(probe_goal(300_000, None), 300_000);
@@ -346,24 +480,26 @@ mod tests {
         let t0 = Instant::now();
         let hold = Duration::from_secs(1);
         let mut h = Hold::default();
+        let up = p(2, 0);
         assert_eq!(
-            h.update(Some(2), Some(2), true, Congestion::None, hold, t0),
+            h.update(up, up, None, true, Congestion::None, hold, t0),
             Change::Down,
             "first"
         );
         // A dip without evidence: nothing, however long.
         let later = t0 + Duration::from_secs(5);
+        let (h1, h0) = (p(1, 0), p(1, 0));
         assert_eq!(
-            h.update(Some(1), Some(1), true, Congestion::None, hold, later),
+            h.update(h1, h1, up, true, Congestion::None, hold, later),
             Change::None
         );
         // Queueing or loss: down at once.
         assert_eq!(
-            h.update(Some(1), Some(1), true, Congestion::Queueing, hold, later),
+            h.update(h0, h0, up, true, Congestion::Queueing, hold, later),
             Change::Down
         );
         assert_eq!(
-            h.update(None, None, true, Congestion::Loss, hold, later),
+            h.update(None, None, up, true, Congestion::Loss, hold, later),
             Change::Down
         );
         assert_eq!(h.applied, Some(None));
@@ -375,18 +511,21 @@ mod tests {
         let at = |ms: u64| t0 + Duration::from_millis(ms);
         let hold = Duration::from_millis(1100);
         let mut h = Hold::default();
-        h.update(Some(0), Some(0), true, Congestion::None, hold, t0);
+        let t = l1t3(2);
+        h.update(p(0, 2), p(0, 2), None, true, Congestion::None, hold, t0);
         let up = |h: &mut Hold, may: bool, ms: u64| {
-            h.update(Some(2), Some(2), may, Congestion::None, hold, at(ms))
+            let next = next_step(&t, h.applied.flatten()).map(|(p, _)| p);
+            h.update(p(2, 2), p(2, 2), next, may, Congestion::None, hold, at(ms))
         };
         assert_eq!(up(&mut h, true, 0), Change::None);
         assert_eq!(up(&mut h, true, 1000), Change::None);
         assert_eq!(up(&mut h, false, 1100), Change::None, "another went up");
+        // The next layer that costs more: 360p at half the frames.
         assert_eq!(up(&mut h, true, 1200), Change::Up);
-        assert_eq!(h.applied, Some(Some(1)));
+        assert_eq!(h.applied, Some(p(1, 1)));
         assert_eq!(up(&mut h, true, 1300), Change::None);
         assert_eq!(up(&mut h, true, 2400), Change::Up);
-        assert_eq!(h.applied, Some(Some(2)));
+        assert_eq!(h.applied, Some(p(1, 2)));
     }
 
     #[test]
@@ -394,21 +533,22 @@ mod tests {
         let t0 = Instant::now();
         let hold = Duration::from_secs(1);
         let mut h = Hold::default();
-        h.update(Some(1), Some(1), true, Congestion::None, hold, t0);
+        h.update(p(1, 0), p(1, 0), None, true, Congestion::None, hold, t0);
         // The current estimate fits only h, the peak f: up after the hold.
         let at = |s: u64| t0 + Duration::from_secs(s);
+        let (h1, f) = (p(1, 0), p(2, 0));
         assert_eq!(
-            h.update(Some(1), Some(2), true, Congestion::None, hold, at(1)),
+            h.update(h1, f, f, true, Congestion::None, hold, at(1)),
             Change::None
         );
         assert_eq!(
-            h.update(Some(1), Some(2), true, Congestion::None, hold, at(2)),
+            h.update(h1, f, f, true, Congestion::None, hold, at(2)),
             Change::Up
         );
-        assert_eq!(h.applied, Some(Some(2)));
+        assert_eq!(h.applied, Some(f));
         // Current below without evidence: stays.
         assert_eq!(
-            h.update(Some(1), Some(2), true, Congestion::None, hold, at(3)),
+            h.update(h1, f, None, true, Congestion::None, hold, at(3)),
             Change::None
         );
     }
