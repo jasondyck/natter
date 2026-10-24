@@ -98,6 +98,10 @@ impl Pick {
     }
 }
 
+/// A camera's higher spatial layers keep temporal layers with at least
+/// half the frame rate of all of them (within LiveKit's 90% tolerance).
+const HALF_FRAME_RATE: f32 = 0.5 * 0.9;
+
 /// Spatial and temporal layers told apart.
 pub const SPATIAL: usize = 3;
 pub const TEMPORAL: usize = crate::livekit::video::TEMPORAL_LAYERS;
@@ -135,6 +139,70 @@ impl Track {
     /// Its lowest layer.
     pub fn lowest(&self) -> Option<Pick> {
         self.layers().next().map(|(p, _)| p)
+    }
+
+    /// Takes out the layers it isn't to be given, by how people judge video
+    /// on a call (`docs/livekit/PARITY.md`, "Status"), from each layer's
+    /// frame rates up to each temporal layer (0: not measured):
+    /// - Without pausing, the lowest spatial layer keeps all the frames it
+    ///   may have. Fewer are worth it only where the alternative is a
+    ///   pause; and sending less leaves GCC to recover from a loss as
+    ///   slowly as the little acknowledged allows (str0m probes only while
+    ///   application-limited): it held everyone at 180p and 5 fps.
+    /// - A camera's higher spatial layers keep at least half their frame
+    ///   rate (unless its frame rate setting asks for fewer): faces stay
+    ///   acceptable at 10-15 fps when sharper, but below about 10 lips
+    ///   and fingerspelling stop reading.
+    /// - A screen share's lower spatial layers come only at their fewest
+    ///   frames, so it gains resolution before frames (text needs it; as
+    ///   LiveKit's SDKs, which keep a screen share's resolution).
+    pub fn shape(&mut self, fps: &[[f32; TEMPORAL]; SPATIAL], allow_pause: bool) {
+        let sent = |r: &[Option<u32>; TEMPORAL]| r.iter().any(Option::is_some);
+        let Some(lowest) = self.rates.iter().position(sent) else {
+            return;
+        };
+        let highest = self.rates.iter().rposition(sent).unwrap_or(lowest);
+        for (s, f) in fps.iter().enumerate().take(highest + 1).skip(lowest) {
+            let rates = self.rates[s];
+            let Some(top) = rates.iter().rposition(Option::is_some) else {
+                continue;
+            };
+            let present = |t: usize| rates[t].is_some();
+            let fewest = (0..=top).find(|&t| present(t)).unwrap_or(top);
+            // The most it may have: its frame rate setting's layer.
+            let wanted = (0..=top.min(usize::from(self.max_temporal[s])))
+                .rev()
+                .find(|&t| present(t))
+                .unwrap_or(fewest);
+            let keep = |t: usize| -> bool {
+                if s == lowest && !allow_pause {
+                    t == wanted
+                } else if self.screen {
+                    s == highest || t == fewest
+                } else if s == lowest {
+                    true
+                } else {
+                    // Unmeasured: the top two.
+                    let measured = f[top] > 0.0;
+                    let half = (0..=top)
+                        .find(|&t| {
+                            present(t)
+                                && if measured {
+                                    f[t] >= f[top] * HALF_FRAME_RATE
+                                } else {
+                                    t + 1 >= top
+                                }
+                        })
+                        .unwrap_or(top);
+                    t >= half.min(wanted)
+                }
+            };
+            for (t, r) in self.rates[s].iter_mut().enumerate() {
+                if !keep(t) {
+                    *r = None;
+                }
+            }
+        }
     }
 
     fn rate(&self, p: Pick) -> Option<u32> {
@@ -408,6 +476,52 @@ mod tests {
         let mut capped = l1t3(2);
         capped.max_temporal = [1; SPATIAL];
         assert_eq!(allocate(10_000_000, &[capped]), [p(2, 1)]);
+    }
+
+    /// Chrome's L1T3 frame rates from a 20 fps camera.
+    const FPS: [[f32; TEMPORAL]; SPATIAL] = [[5.0, 10.0, 20.0, 0.0]; SPATIAL];
+
+    fn temporal_layers(t: &Track) -> Vec<Vec<usize>> {
+        t.rates
+            .iter()
+            .map(|r| (0..TEMPORAL).filter(|&l| r[l].is_some()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn shaped_by_how_people_judge_video() {
+        // A camera: all the frames of the lowest layer, at least half of
+        // the others'.
+        let mut t = l1t3(2);
+        t.shape(&FPS, false);
+        assert_eq!(temporal_layers(&t), [vec![2], vec![1, 2], vec![1, 2]]);
+        assert_eq!(
+            allocate(1_000_000, &[t.clone(), t.clone()]),
+            [p(1, 2), p(1, 2)]
+        );
+        // Fewer at the lowest only where the alternative is a pause.
+        let mut t = l1t3(2);
+        t.shape(&FPS, true);
+        assert_eq!(temporal_layers(&t), [vec![0, 1, 2], vec![1, 2], vec![1, 2]]);
+        // Asking for 5 fps still gets them.
+        let mut t = l1t3(2);
+        t.max_temporal = [0; SPATIAL];
+        t.shape(&FPS, false);
+        assert_eq!(temporal_layers(&t), [vec![0], vec![0, 1, 2], vec![0, 1, 2]]);
+        assert_eq!(allocate(10_000_000, &[t]), [p(2, 0)]);
+        // Not measured yet: the top two temporal layers.
+        let mut t = l1t3(2);
+        t.shape(&[[0.0; TEMPORAL]; SPATIAL], true);
+        assert_eq!(temporal_layers(&t), [vec![0, 1, 2], vec![1, 2], vec![1, 2]]);
+        // A screen share: resolution before frames.
+        let mut t = l1t3(2);
+        t.screen = true;
+        t.shape(&FPS, true);
+        assert_eq!(temporal_layers(&t), [vec![0], vec![0], vec![0, 1, 2]]);
+        let one = std::slice::from_ref(&t);
+        assert_eq!(allocate(300_000, one), [p(1, 0)]);
+        assert_eq!(allocate(500_000, one), [p(2, 0)]);
+        assert_eq!(allocate(800_000, one), [p(2, 1)]);
     }
 
     #[test]

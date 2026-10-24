@@ -80,6 +80,7 @@ impl Engine {
             }
             let mut rates = [[None; allocator::TEMPORAL]; allocator::SPATIAL];
             let mut max_temporal = [video::ANY_LAYER; allocator::SPATIAL];
+            let mut fps = [[0.0; allocator::TEMPORAL]; allocator::SPATIAL];
             // SVC: a spatial layer costs itself and every layer below, each
             // up to the same temporal layer.
             if let Some(svc) = &t.svc {
@@ -98,6 +99,7 @@ impl Engine {
                         rates[s][tl] = own.map(|_| sum[tl].max(1));
                     }
                     max_temporal[s] = video::temporal_for_fps(&l.fps, d.fps);
+                    fps[s] = l.fps;
                 }
             }
             for l in t.layers.iter().filter(|l| l.live(now) && t.svc.is_none()) {
@@ -111,38 +113,20 @@ impl Engine {
                 let rate = allocator::layer_rate(l.bitrate, announced, s);
                 rates[usize::from(s)] = temporal_rates(l, rate);
                 max_temporal[usize::from(s)] = video::temporal_for_fps(&l.fps, d.fps);
+                fps[usize::from(s)] = l.fps;
             }
             if rates.iter().flatten().all(Option::is_none) {
                 continue;
             }
-            // Fewer frames of the lowest spatial layer are worth it only
-            // where the alternative is a pause. Without pausing it keeps
-            // all it may have: the link carries at least that, and sending
-            // less leaves GCC's estimate to recover from a loss as slowly
-            // as the little acknowledged allows (str0m probes only while
-            // application-limited), so it stayed at a quarter of the frames.
-            if !p.allow_pause
-                && let Some(s) = rates.iter().position(|r| r.iter().any(Option::is_some))
-            {
-                let top = rates[s].iter().rposition(Option::is_some).unwrap_or(0);
-                let keep = top.min(usize::from(max_temporal[s]));
-                let keep = (0..=keep)
-                    .rev()
-                    .find(|&t| rates[s][t].is_some())
-                    .unwrap_or(top);
-                for (t, r) in rates[s].iter_mut().enumerate() {
-                    if t != keep {
-                        *r = None;
-                    }
-                }
-            }
-            keys.push(k);
-            tracks.push(allocator::Track {
+            let mut track = allocator::Track {
                 screen: t.info.source == lk::TrackSource::ScreenShare as i32,
                 max,
                 max_temporal,
                 rates,
-            });
+            };
+            track.shape(&fps, p.allow_pause);
+            keys.push(k);
+            tracks.push(track);
         }
         let p = &mut self.participants[i];
         let audio_bps = match p.cc.audio_sample.replace((p.cc.audio_bytes_out, now)) {
