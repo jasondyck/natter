@@ -1208,10 +1208,13 @@ impl TwccSendRegister {
             .skip_while(|(seq, _, _)| seq < &head_seq);
         let (first_seq_no, _, first_instant) = iter.next()?;
 
-        let mut iter2 = self
-            .queue
-            .iter_mut()
-            .skip_while(|r| *r.seq() < *first_seq_no);
+        // The queue is in seq order: find the report's first record by
+        // binary search, not by walking every older record.
+        let Ok(first_index) = self.queue.binary_search_by_key(&first_seq_no, |r| r.seq()) else {
+            // Old report for which we no longer have any send records.
+            return None;
+        };
+        let mut iter2 = self.queue.range_mut(first_index..);
         let first_record = iter2.next()?;
 
         fn update(
@@ -1248,11 +1251,6 @@ impl TwccSendRegister {
             true
         }
 
-        if first_record.seq() != first_seq_no {
-            // Old report for which we no longer have any send records.
-            return None;
-        }
-
         let mut problematic_seq = None;
 
         if !update(
@@ -1285,11 +1283,6 @@ impl TwccSendRegister {
                     \nLast 100 entires in queue: {queue_tail:?}."
             );
         }
-
-        let first_index = self
-            .queue
-            .binary_search_by_key(&first_seq_no, |r| r.seq())
-            .expect("first_seq_no to be registered");
 
         let range = first_seq_no..=last_seq_no;
 
