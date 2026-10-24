@@ -487,11 +487,13 @@ pub struct Layer {
     pub bytes: u64,
     pub window_start: Instant,
     pub bitrate: u32,
-    /// Frames begun since `window_start` per temporal layer, and the frame
-    /// rate of the last whole window up to each temporal layer (0 for
-    /// layers not seen).
+    /// Frames begun and bytes since `window_start` per temporal layer, and
+    /// the frame rate and bitrate of the last whole window up to each
+    /// temporal layer (0 for layers not seen).
     frames: [u32; TEMPORAL_LAYERS],
+    temporal_bytes: [u64; TEMPORAL_LAYERS],
     pub fps: [f32; TEMPORAL_LAYERS],
+    pub temporal_rates: [u32; TEMPORAL_LAYERS],
     /// A simulcast stream's dependency descriptors (its temporal layers).
     pub dd: super::dd::Stream,
 }
@@ -513,7 +515,9 @@ impl Layer {
             window_start: now,
             bitrate: 0,
             frames: [0; TEMPORAL_LAYERS],
+            temporal_bytes: [0; TEMPORAL_LAYERS],
             fps: [0.0; TEMPORAL_LAYERS],
+            temporal_rates: [0; TEMPORAL_LAYERS],
             dd: Default::default(),
         }
     }
@@ -522,29 +526,40 @@ impl Layer {
         now.duration_since(self.last_seen) < LAYER_TIMEOUT
     }
 
-    /// Counts a packet of `len` payload bytes, and its headers; `frame` is
-    /// the temporal layer of the frame it begins, if it begins one.
-    pub fn count(&mut self, len: usize, frame: Option<u8>, now: Instant) {
+    /// Counts a packet of `len` payload bytes, and its headers, of
+    /// temporal layer `temporal` (0 when the stream has none), which begins
+    /// a frame if `starts_frame`.
+    pub fn count(&mut self, len: usize, temporal: u8, starts_frame: bool, now: Instant) {
         self.last_seen = now;
-        self.bytes += len as u64 + super::allocator::PACKET_OVERHEAD;
-        if let Some(t) = frame {
-            self.frames[usize::from(t).min(TEMPORAL_LAYERS - 1)] += 1;
+        let bytes = len as u64 + super::allocator::PACKET_OVERHEAD;
+        self.bytes += bytes;
+        let t = usize::from(temporal).min(TEMPORAL_LAYERS - 1);
+        self.temporal_bytes[t] += bytes;
+        if starts_frame {
+            self.frames[t] += 1;
         }
         let elapsed = now.duration_since(self.window_start);
         if elapsed >= RATE_WINDOW {
             let ms = elapsed.as_millis().max(1) as u64;
             self.bitrate = (self.bytes * 8 * 1000 / ms) as u32;
             self.bytes = 0;
-            let mut frames = 0;
+            let (mut frames, mut bytes) = (0, 0);
             for t in 0..TEMPORAL_LAYERS {
                 frames += self.frames[t];
+                bytes += self.temporal_bytes[t];
                 self.fps[t] = if self.frames[t] == 0 {
                     0.0
                 } else {
                     frames as f32 * 1000.0 / ms as f32
                 };
+                self.temporal_rates[t] = if self.temporal_bytes[t] == 0 {
+                    0
+                } else {
+                    (bytes * 8 * 1000 / ms) as u32
+                };
             }
             self.frames = [0; TEMPORAL_LAYERS];
+            self.temporal_bytes = [0; TEMPORAL_LAYERS];
             self.window_start = now;
         }
     }
@@ -1347,8 +1362,8 @@ mod tests {
         for k in 0..32u32 {
             let at = t0 + Duration::from_micros(u64::from(k) * 33_334);
             let tid = [0, 2, 1, 2][k as usize % 4];
-            l.count(1000, Some(tid), at);
-            l.count(1000, None, at);
+            l.count(1000, tid, true, at);
+            l.count(1000, tid, false, at);
         }
         let [a, b, c, d] = l.fps;
         assert!(
@@ -1357,5 +1372,17 @@ mod tests {
             l.fps
         );
         assert!((29.0..32.0).contains(&c) && d == 0.0, "{:?}", l.fps);
+        // Bitrates likewise: a quarter, half and all of the bytes.
+        let [a, b, c, d] = l.temporal_rates;
+        assert!(
+            d == 0 && a > 0 && (b as f32 / a as f32 - 2.0).abs() < 0.2,
+            "{:?}",
+            l.temporal_rates
+        );
+        assert!(
+            (c as f32 / a as f32 - 4.0).abs() < 0.4 && c == l.bitrate,
+            "{:?}",
+            l.temporal_rates
+        );
     }
 }

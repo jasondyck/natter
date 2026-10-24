@@ -103,10 +103,47 @@ leave no gap (LiveKit's VP8 munger; also across simulcast switches).
 Sequence numbers stay contiguous. Congestion control still allocates
 spatial layers only (see "Next").
 
+**Temporal layers in congestion control**: layers are allocated as
+LiveKit's, spatial then temporal (every track's lowest spatial layer at
+each frame rate before anyone's next one), costed by each layer's
+bitrate up to each temporal layer (counted from its packets' temporal
+ids, cumulative over spatial layers for SVC). Upgrades take the next
+layer that costs more, one per hold. Over the thin link
+(`bench/e2e/thin`, Chrome both ends, 2 simulcast cameras, 3 subscribers,
+150 ms round trip, 3 runs each; height share and frames a second per
+subscribed track):
+
+| link | natter before | natter now | LiveKit 1.13.10 |
+|---|---|---|---|
+| 600 kbit/s | 180p, 20 fps | 180p, 20 fps | 360p (some 720p), 9–10 fps, audio jitter buffer ~200 ms, one run with 3.9% video loss and 9 freezes |
+| 1000 kbit/s | 180p 80% / 360p 20%, 20 fps | 180p 66% / 360p 30%, 19 fps | 720p, 7–8.5 fps, two runs with 1.5–5% video loss and 7 freezes |
+| 1400 kbit/s | 180p 33–77% / 360p, 20 fps | 720p 34–67% / 360p / 180p, 15–16 fps | 720p, 10–14 fps, audio jitter buffer ~200 ms |
+| 2000 kbit/s | 720p, 20 fps | 720p, 20 fps | 720p, 20 fps |
+
+natter lost no audio or video and froze nowhere. Which layers a track is
+offered follows how people judge video on calls (`allocator::Track::shape`):
+- Without pausing (`allow_pause`, off by default) the lowest spatial layer
+  keeps all its frames, as natter's floor did before: given fewer, str0m's
+  GCC (which probes only while the sender is application-limited)
+  recovered from the start-of-call loss as slowly as the little
+  acknowledged allowed, and held everyone at 180p and 5 fps.
+- A camera's higher spatial layers keep at least half their frame rate
+  (Chrome's L1T3 from a 20 fps camera: 10 fps), unless the subscriber's
+  `fps` asks for fewer. Viewers accept far lower frame rates than blurrier
+  or blockier pictures (soccer fans found 6 fps acceptable 80% of the time
+  at CIF, while acceptability collapsed past a quantizer of 8: McCarthy
+  et al., CHI 2004), most so for low-motion content such as faces; but
+  lip reading wants about 17 frames a second and suffers below (JSHR
+  1994), speech on video calls was understood better above 7 fps, and
+  sign language stays intelligible at 10 fps with fingerspelling needing
+  more (MobileASL). Zoom drops to about 14 fps for thumbnails and heavy
+  congestion, and sends under 10 fps in only 10% of samples (Michel et
+  al., IMC 2022).
+- A screen share's lower spatial layers come only at their fewest frames,
+  so it gains resolution before frames, as LiveKit's SDKs publish screen
+  shares (`maintain-resolution`; cameras `maintain-framerate`).
+
 **Next:** the open items, in order:
-   - Temporal layers in congestion control: LiveKit allocates spatial
-     then temporal layers by per-temporal bitrates when the link is
-     short; natter steps spatial layers only.
    - DD rewrite (`DDForwarder`).
    - Stream trackers as LiveKit's.
    - `subscribed_audio_codec_update`: needs audio backup codecs first
@@ -571,6 +608,13 @@ track and LOW for the other, no loss.
       draining node waiting for its rooms to end (it leaves at once)
 
 ## Deliberate differences
+
+- Congestion control takes a layer only when it costs more than the one
+  held (LiveKit takes any layer whose rate fits, so a higher spatial
+  layer at fewer frames can replace a lower one at all of them); without
+  `allow_pause` the lowest spatial layer keeps all its temporal layers; a
+  camera's higher spatial layers keep at least half their frame rate; and
+  a screen share gains resolution before frames (see "Status").
 
 - Temporal layers by `fps`: frame rates are counted continuously (every
   second) rather than measured once per stream; the cap follows the
