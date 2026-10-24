@@ -89,8 +89,24 @@ Timing each stage found:
 - The join-latency clock now starts when the request comes in, before
   the token check, as LiveKit's.
 
+**Temporal layers by `fps`** (`bench/e2e/fps.mjs`, VP8 simulcast with
+and without the dependency descriptor, VP9 and AV1 SVC, H.264; same
+output as LiveKit's): a subscriber's `UpdateTrackSettings.fps` caps it at
+the lowest temporal layer whose frame rate is within 90% of it, as
+LiveKit's `GetTemporalLayerForSpatialFps`. Frame rates per temporal layer
+are counted per layer every second. Chrome sends VP8 simulcast as L1T3
+with a dependency descriptor per stream and no PictureID, so each stream
+keeps its own descriptor structure and is filtered by decode target like
+SVC (LiveKit's DD temporal selector); without the descriptor, by the VP8
+TID, with PictureID, TL0PICIDX and KEYIDX renumbered so dropped pictures
+leave no gap (LiveKit's VP8 munger; also across simulcast switches).
+Sequence numbers stay contiguous. Congestion control still allocates
+spatial layers only (see "Next").
+
 **Next:** the open items, in order:
-   - Temporal layers by `fps`.
+   - Temporal layers in congestion control: LiveKit allocates spatial
+     then temporal layers by per-temporal bitrates when the link is
+     short; natter steps spatial layers only.
    - DD rewrite (`DDForwarder`).
    - Stream trackers as LiveKit's.
    - `subscribed_audio_codec_update`: needs audio backup codecs first
@@ -283,8 +299,8 @@ H.265 is negotiated but untested: Chrome on Linux doesn't encode it.
 - [x] `update_track_settings`: `disabled`, `quality`, `width`/`height`
       (smallest layer ≥ 90% of the size, heights or portrait widths),
       kept for tracks subscribed later; adaptive-stream clients start at
-      the lowest layer. Not yet: `fps` (temporal layers), LiveKit's 100 ms
-      debounce
+      the lowest layer; `fps` (temporal layers, phase 6). Not yet:
+      LiveKit's 100 ms debounce
 - [x] Dynacast: `subscribed_quality_update` with the highest quality
       anyone receives, none when nobody does; higher at once, lower after
       5 s (`dynacast_pause_delay`); not while muted, re-sent on unmute (C.4)
@@ -352,7 +368,9 @@ track and LOW for the other, no loss.
       SVC by cumulative spatial-layer rates
 - [ ] DD rewritten as LiveKit's `DDForwarder` (active decode targets);
       passed through unchanged for now, which Chrome accepts
-- [ ] Temporal layers by `fps` (SVC and VP8)
+- [x] Temporal layers by `fps` (VP8 simulcast by its dependency
+      descriptor or TID with PictureID renumbering, VP9/AV1 SVC); see
+      "Status"
 - [x] Backup codecs and codec regression (C.6): `TrackInfo.codecs` lists
       the client's backup; a subscriber with no payload type for the
       primary takes the backup, which dynacast asks the publisher for (per
@@ -553,6 +571,12 @@ track and LOW for the other, no loss.
       draining node waiting for its rooms to end (it leaves at once)
 
 ## Deliberate differences
+
+- Temporal layers by `fps`: frame rates are counted continuously (every
+  second) rather than measured once per stream; the cap follows the
+  frame rates of the layer being forwarded rather than of the highest
+  one the subscriber may get; and `fps: 0` lifts the cap (LiveKit keeps
+  the last one).
 
 - Room counts are exact when sent. LiveKit recounts only when something
   marks the room dirty (a join, a leave), so its `num_publishers` can

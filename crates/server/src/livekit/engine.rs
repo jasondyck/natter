@@ -398,8 +398,7 @@ struct Published {
 }
 
 struct Svc {
-    structure: Option<dd::Structure>,
-    active: u32,
+    dd: dd::Stream,
     spatial: [Layer; 3],
 }
 
@@ -454,6 +453,9 @@ struct DownTrack {
     /// Video: the highest spatial layer the subscriber wants (its track
     /// settings), None when it disabled the track.
     max_layer: Option<u8>,
+    /// Video: the frame rate the subscriber asks for (0: any), served by
+    /// the lowest temporal layer that has it (`video::temporal_for_fps`).
+    fps: u32,
     /// Video: the layer congestion control holds it to (`applied` None
     /// until first allocated; Some(None) while paused for bandwidth).
     hold: allocator::Hold,
@@ -464,6 +466,8 @@ struct DownTrack {
     stream_state: StreamState,
     /// Video SVC: the decode target it receives.
     svc: video::SvcDown,
+    /// Video VP8: its temporal layer and picture numbering.
+    vp8: video::Vp8Down,
     /// Video: the subscriber has no payload type for the track's primary
     /// codec, so it takes the backup codec's stream; and which stream it
     /// was last forwarded from.
@@ -1717,9 +1721,11 @@ fn new_downtrack(
         video_pts: vec![],
         layer: None,
         max_layer: prefs.max_layer(t),
+        fps: prefs.settings.get(&t.info.sid).map_or(0, |s| s.fps),
         hold: allocator::Hold::default(),
         stream_state: StreamState::Inactive,
         svc: video::SvcDown::default(),
+        vp8: video::Vp8Down::default(),
         cannot_primary: false,
         on_backup: false,
         last_out: None,

@@ -499,9 +499,10 @@ impl Engine {
             };
             let max = video::max_layer(&t.info.layers, &req);
             let d = &mut self.participants[i].downtracks[k];
-            if d.max_layer != max {
-                debug!(track = %sid, ?max, "subscriber settings");
+            if d.max_layer != max || d.fps != req.fps {
+                debug!(track = %sid, ?max, fps = req.fps, "subscriber settings");
                 d.max_layer = max;
+                d.fps = req.fps;
             }
         }
     }

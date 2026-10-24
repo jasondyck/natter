@@ -1,12 +1,15 @@
 //! The AV1 RTP Dependency Descriptor (AV1 RTP specification, Appendix A):
 //! which spatial and temporal layer a frame belongs to and which decode
 //! targets need it. Chrome sends it with VP9 and AV1 SVC (one stream
-//! carrying every layer), and an SFU uses it to forward each subscriber
-//! only the layers it can show.
+//! carrying every layer) and with each VP8 simulcast stream (its temporal
+//! layers), and an SFU uses it to forward each subscriber only the layers
+//! it can show.
 //!
 //! The template structure comes with keyframes; other descriptors (usually
 //! 3 bytes) name a template in it, so the parser keeps the latest structure
 //! per stream.
+
+use std::sync::Arc;
 
 /// Decode target indications: how a frame matters to a decode target
 /// (0 not present, 1 discardable, 2 switch point, 3 required).
@@ -113,6 +116,30 @@ impl Bits<'_> {
 }
 
 /// Parses a descriptor, against `known`, the stream's latest structure.
+/// What one stream's descriptors said lately: its structure, and the
+/// decode targets the sender has active.
+#[derive(Debug, Clone, Default)]
+pub struct Stream {
+    pub structure: Option<Arc<Structure>>,
+    pub active: u32,
+}
+
+impl Stream {
+    /// Parses a descriptor of this stream, keeping a structure it carries
+    /// and the active decode targets it names.
+    pub fn parse(&mut self, data: &[u8]) -> Option<Frame> {
+        let mut f = parse(data, self.structure.as_deref()).ok()?;
+        if let Some(s) = f.structure.take() {
+            self.active = (1u32 << s.dt_cnt().min(31)) - 1;
+            self.structure = Some(Arc::new(s));
+        }
+        if let Some(a) = f.active {
+            self.active = a;
+        }
+        Some(f)
+    }
+}
+
 pub fn parse(data: &[u8], known: Option<&Structure>) -> Result<Frame, Error> {
     let mut b = Bits { data, pos: 0 };
     let start = b.flag()?;

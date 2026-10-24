@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use livekit_protocol as lk;
 use lk::signal_response;
+use str0m::format::Codec;
 use str0m::media::{KeyframeRequestKind, MediaKind, Rid};
 use str0m::rtp::{ExtensionValues, RtpPacket};
 use tracing::{debug, info, warn};
@@ -276,17 +277,64 @@ impl Engine {
         };
         let codec = params.spec().codec;
         let keyframe = video::starts_keyframe(codec, &pkt.payload);
+        let dd = pkt
+            .header
+            .ext_vals
+            .user_values
+            .get::<video::DependencyDescriptor>();
         let track = &mut p.published[t_index];
         let len = pkt.payload.len();
-        match track.layers.iter_mut().find(|l| l.rid == rid) {
-            Some(l) => l.count(len, now),
-            None => {
-                let spatial = video::spatial(&track.info.layers, rid);
-                let mut layer = Layer::new(rid, spatial, now);
-                layer.count(len, now);
-                track.layers.push(layer);
+        // SVC: which layers this packet's frame belongs to, by the
+        // dependency descriptor of the one stream.
+        let svc_mode = video::is_svc(codec) && rid.is_none();
+        let mut svc_frame = None;
+        if svc_mode {
+            let svc = track.svc.get_or_insert_with(|| Svc {
+                dd: dd::Stream::default(),
+                spatial: [0, 1, 2].map(|s| Layer::new(None, s, now)),
+            });
+            if let Some(f) = dd.and_then(|dd| svc.dd.parse(&dd.0)) {
+                svc.spatial[usize::from(f.spatial.min(2))].count(
+                    len,
+                    f.start.then_some(f.temporal),
+                    now,
+                );
+                svc_frame = svc.dd.structure.clone().map(|st| (f, st, svc.dd.active));
             }
         }
+        let layer = match track.layers.iter().position(|l| l.rid == rid) {
+            Some(k) => &mut track.layers[k],
+            None => {
+                let spatial = video::spatial(&track.info.layers, rid);
+                track.layers.push(Layer::new(rid, spatial, now));
+                track.layers.last_mut().expect("pushed")
+            }
+        };
+        // A simulcast stream's temporal layers: by its dependency
+        // descriptor (Chrome sends VP8 with one and no PictureID), else by
+        // the VP8 payload descriptor, whose picture numbering subscribers
+        // then see rewritten.
+        let mut layer_frame = None;
+        let mut vp8 = None;
+        let frame = if svc_mode {
+            None
+        } else if let Some(f) = dd.and_then(|dd| layer.dd.parse(&dd.0)) {
+            let start = f.start.then_some(f.temporal);
+            layer_frame = layer
+                .dd
+                .structure
+                .clone()
+                .map(|st| (f, st, layer.dd.active));
+            start
+        } else {
+            vp8 = (codec == Codec::Vp8)
+                .then(|| video::vp8_descriptor(&pkt.payload))
+                .flatten()
+                .filter(|d| d.picture_id.is_some());
+            vp8.filter(|d| d.start).map(|d| d.tid.unwrap_or(0))
+        };
+        layer.count(len, frame, now);
+        let rates = layer.fps;
         track.keyframe_seen |= keyframe;
         let resized = track.size_from_media
             && keyframe
@@ -294,31 +342,6 @@ impl Engine {
                 let spatial = video::spatial(&track.info.layers, rid);
                 set_layer_size(&mut track.info, spatial, w, h)
             });
-        // SVC: which layers this packet's frame belongs to.
-        let mut svc_frame = None;
-        if video::is_svc(codec) && rid.is_none() {
-            let svc = track.svc.get_or_insert_with(|| Svc {
-                structure: None,
-                active: 0,
-                spatial: [0, 1, 2].map(|s| Layer::new(None, s, now)),
-            });
-            let dd = pkt
-                .header
-                .ext_vals
-                .user_values
-                .get::<video::DependencyDescriptor>();
-            if let Some(Ok(f)) = dd.map(|dd| dd::parse(&dd.0, svc.structure.as_ref())) {
-                if let Some(s) = &f.structure {
-                    svc.structure = Some(s.clone());
-                    svc.active = (1u32 << s.dt_cnt().min(31)) - 1;
-                }
-                if let Some(a) = f.active {
-                    svc.active = a;
-                }
-                svc.spatial[usize::from(f.spatial.min(2))].count(len, now);
-                svc_frame = Some(f);
-            }
-        }
         if resized {
             let room = p.room.clone();
             p.version += 1;
@@ -364,12 +387,10 @@ impl Engine {
         let has_trailer = !track.info.packet_trailer_features.is_empty();
         let track_sid = track.info.sid.clone();
         let describe = svc_frame.is_some();
-        let svc = svc_frame.zip(
-            track
-                .svc
-                .as_ref()
-                .and_then(|s| s.structure.clone().map(|st| (st, s.active))),
-        );
+        let svc_rates = track
+            .svc
+            .as_ref()
+            .map(|s| s.spatial.each_ref().map(|l| l.fps));
         // The layer to follow for each highest layer a subscriber may want.
         let targets: [Option<Option<Rid>>; 4] =
             [0, 1, 2, video::ANY_LAYER].map(|max| video::target_layer(&track.layers, max, now));
@@ -396,6 +417,9 @@ impl Engine {
             ext.user_values.set(dd.clone());
         }
         let mut want_keyframe: Vec<Option<Rid>> = vec![];
+        // VP8 payloads renumbered, shared by subscribers that see the same
+        // numbers (and trailer or not).
+        let mut renumbered: Vec<(video::Vp8Ids, bool, Arc<[u8]>)> = vec![];
 
         for conn in subscribers {
             let Some(&j) = self.by_conn.get(&conn) else {
@@ -439,6 +463,7 @@ impl Engine {
                 continue;
             };
             let target = targets[usize::from(max.min(cap).min(3))];
+            let max_temporal = video::temporal_for_fps(&rates, d.fps);
             // Forwarding starts here from nothing (LiveKit's `IsResuming`).
             let mut layer_started = false;
             if d.layer != target {
@@ -448,9 +473,13 @@ impl Engine {
                     want_keyframe.push(target);
                 }
                 if target == Some(rid) && keyframe {
-                    debug!(identity = %s.identity, track = %track_sid, ?rid, "following layer");
+                    debug!(identity = %s.identity, track = %track_sid, ?rid, temporal = if layer_frame.is_some() { "dd" } else if vp8.is_some() { "vp8" } else { "-" }, "following layer");
                     layer_started = d.layer.is_none();
                     d.layer = Some(rid);
+                    d.svc = video::SvcDown::default();
+                    if let Some(v) = &vp8 {
+                        d.vp8.restart(v, max_temporal);
+                    }
                     // Carry on the outgoing stream from the old layer's
                     // last packet, as if this one came next.
                     if let Some((out_seq, out_ts, at)) = d.last_out {
@@ -461,15 +490,22 @@ impl Engine {
                 }
             }
             if d.layer != Some(rid) {
-                d.svc = video::SvcDown::default();
                 continue;
             }
             // SVC: only the frames of its decode target, the marker at the
             // end of its top spatial layer, and the sequence numbers kept
             // contiguous over what is dropped.
             let mut marker = pkt.header.marker;
-            if let Some((f, (st, active))) = &svc {
-                let limit = (max.min(cap).min(2), 2);
+            if let Some((f, st, active)) = svc_frame.as_ref().or(layer_frame.as_ref()) {
+                // A simulcast stream's are its temporal layers only.
+                let limit = match svc_rates {
+                    Some(r) if svc_frame.is_some() => {
+                        let spatial = max.min(cap).min(2);
+                        let rates = &r[usize::from(spatial)];
+                        (spatial, video::temporal_for_fps(rates, d.fps))
+                    }
+                    _ => (video::ANY_LAYER, max_temporal),
+                };
                 let before = d.svc.dt;
                 let c = video::svc_select(
                     st,
@@ -483,11 +519,25 @@ impl Engine {
                 if d.svc.dt != before {
                     debug!(identity = %s.identity, track = %track_sid, from = ?before.map(|dt| st.dt_layers[dt]), to = ?d.svc.dt.map(|dt| st.dt_layers[dt]), frame = f.number, keyframe, dti = ?d.svc.dt.and_then(|dt| f.dtis.get(dt)), active = format!("{active:b}"), "svc switch");
                 }
-                if c.want_keyframe && !want_keyframe.contains(&None) {
-                    want_keyframe.push(None);
+                if c.want_keyframe && !want_keyframe.contains(&rid) {
+                    want_keyframe.push(rid);
                 }
                 match c.forward {
                     Some(m) => marker = m,
+                    None => {
+                        if let Some(o) = d.seq_offset {
+                            d.seq_offset = Some(o.wrapping_sub(1));
+                        }
+                        continue;
+                    }
+                }
+            }
+            // VP8: only the pictures of its temporal layers, renumbered
+            // without the others, and the sequence numbers kept contiguous.
+            let mut ids = None;
+            if let Some(v) = &vp8 {
+                match d.vp8.select(v, keyframe, pkt.header.marker, max_temporal) {
+                    Some(out) => ids = (out != v.ids()).then_some(out),
                     None => {
                         if let Some(o) = d.seq_offset {
                             d.seq_offset = Some(o.wrapping_sub(1));
@@ -528,11 +578,22 @@ impl Engine {
             };
             // The trailer ends a frame: the marker, or the end of a layer's
             // frame in SVC (LiveKit's `isEndOfLayerFrame`).
-            let end_of_frame = pkt.header.marker || svc.as_ref().is_some_and(|(f, _)| f.end);
+            let end_of_frame = pkt.header.marker || svc_frame.as_ref().is_some_and(|(f, ..)| f.end);
             let stripped = strip_trailer
                 .then(|| without_trailer(&pkt.payload, end_of_frame))
                 .flatten();
-            let payload = stripped.as_ref().unwrap_or(&pkt.payload);
+            let mut payload = stripped.as_ref().unwrap_or(&pkt.payload);
+            if let (Some(ids), Some(v)) = (ids, &vp8) {
+                let trailer = stripped.is_some();
+                let k = match renumbered.iter().position(|r| r.0 == ids && r.1 == trailer) {
+                    Some(k) => k,
+                    None => {
+                        renumbered.push((ids, trailer, video::vp8_rewrite(payload, v, ids)));
+                        renumbered.len() - 1
+                    }
+                };
+                payload = &renumbered[k].2;
+            }
             let sent = write(
                 &mut sub!(s).rtc,
                 d,
