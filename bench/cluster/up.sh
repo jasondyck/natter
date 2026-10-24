@@ -27,7 +27,8 @@ YAML
     docker run -d --name lk-$n --network host -v "$here":/c livekit/livekit-server:v1.13.10 --config /c/$n.yaml >/dev/null
   else
     data=$(mktemp -d)
-    (cd "$repo" && NATTER_DATA_DIR="$data" setsid nohup target/release/natter-server --config "$here/$n.yaml" >"$here/$n.log" 2>&1 &)
+    (cd "$repo" && NATTER_DATA_DIR="$data" setsid nohup sh -c 'echo $$ >>"$0"; exec "$@"' "$here/pids" \
+      target/release/natter-server --config "$here/$n.yaml" >"$here/$n.log" 2>&1 &)
   fi
 done
 sleep 3

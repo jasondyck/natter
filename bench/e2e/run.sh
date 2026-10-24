@@ -25,8 +25,11 @@ else
   (cd "$repo" && LIVEKIT_KEYS="devkey: secret" RUST_LOG=natter_server=debug NATTER_SHARDS=1 \
     NATTER_HTTP_ADDR=127.0.0.1:7880 NATTER_ORIGIN=http://localhost:7880 NATTER_PUBLIC_IP=127.0.0.1 \
     NATTER_UDP_PORT=7882 NATTER_TURN_PORT=off NATTER_DATA_DIR="$data" \
-    setsid nohup target/release/natter-server "${natter_config[@]}" >"$here/natter.log" 2>&1 &)
+    setsid nohup sh -c 'echo $$ >"$0"; exec "$@"' "$data/pid" target/release/natter-server "${natter_config[@]}" \
+    >"$here/natter.log" 2>&1 &)
   sleep 2
+  # Only this server is stopped, not a natter running as a service.
+  export NATTER_PID=$(cat "$data/pid")
 fi
 case "$2" in
   *.py) (cd "$here" && timeout 150 "${PYTHON:-python3}" "$2" >"$3" 2>&1) ;;
@@ -36,8 +39,8 @@ if [ "$1" = lk ]; then
   docker logs natter-e2e-lk >"$here/lk.log" 2>&1
   docker rm -f natter-e2e-lk >/dev/null
 else
-  pkill -x natter-server
+  kill "$NATTER_PID" 2>/dev/null
   # It drains webhooks for up to 5 s; the next run needs the ports free.
-  while pgrep -x natter-server >/dev/null; do sleep 0.2; done
+  while kill -0 "$NATTER_PID" 2>/dev/null; do sleep 0.2; done
 fi
 rm -rf "$data"
