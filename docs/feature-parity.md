@@ -55,7 +55,7 @@ viewers), not a conferencing SFU.
 | H.264 | ✅ | ✅ | ✅ | ✅ | 🟡 no SVC | ✅ | ✅ |
 | VP9 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | AV1 | ✅ | ✅ | ✅ | ✅ | 🟡 limited | ✅ | ✅ |
-| H.265 | 🟡 negotiated, untested | ✅ default since 1.9.1¹ | ❌ removed in 3.16.6 | ✅ | ❌ | ❌ | ✅ |
+| H.265 | ✅ forwarded²; browsers send it only with a hardware encoder | ✅ default since 1.9.1¹ | ❌ removed in 3.16.6 | ✅ | ❌ | ❌ | ✅ |
 | RTX retransmission | ✅ | ✅ | ✅ | ✅ | ❔ | ❔ | ❔ |
 | Keyframe requests (PLI/FIR) | ✅ throttled as LiveKit | ✅ | ✅ | ✅ | ❔ | ✅ | ❔ |
 | Simulcast | ✅ per-subscriber layers, dynacast, adaptive stream | ✅ incl. VP9, AV1 | ✅ VP8, H.264 | ✅ | ✅ | ✅ | ❔ |
@@ -64,6 +64,11 @@ viewers), not a conferencing SFU.
 
 ¹ LiveKit's server enables H.265 by default (`config.go`, release 1.9.1),
 though its codec docs don't list it.
+
+² Tested from a WHIP publisher (libx265 through `natter-whip`) to LiveKit's
+JS SDK in Chrome, decoding on the GPU: same results as LiveKit, single and
+dual PC (`bench/e2e/h265.mjs`). Chrome on Linux has no H.265 encoder, so
+no browser-to-browser test.
 
 ## Transport and data
 

@@ -320,7 +320,9 @@ Before video, which multiplies packet rates: a 10-person video call is
 Verified with LiveKit's JS SDK in Chrome (single PC: VP8, H.264, VP9,
 AV1, with and without simulcast, 1280×720 decoded both ways) and its Go
 SDK through `lk load-test` (dual PC: VP8 and H.264 simulcast, no loss).
-H.265 is negotiated but untested: Chrome on Linux doesn't encode it.
+H.265, which Chrome on Linux doesn't encode, from a WHIP publisher
+(`natter-whip`) to the JS SDK, single and dual PC: the same as LiveKit,
+late joiners and re-enabled tracks included (`bench/e2e/h265.mjs`).
 
 ### 4. Simulcast, dynacast, adaptive stream (in progress)
 

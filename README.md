@@ -374,6 +374,16 @@ Verified with ffmpeg 9's WHIP muxer (H.264 Baseline + Opus) and a browser
 WHIP client (trickle, VP8 simulcast, ICE restart, DELETE), watched with
 LiveKit's JS SDK.
 
+ffmpeg's muxer sends only H.264; `natter-whip` (in `crates/load`) sends
+an Annex-B H.264 or H.265 stream from stdin, e.g. libx265's:
+
+    ffmpeg -re -i in.mp4 -c:v libx265 -tune zerolatency -x265-params bframes=0 \
+      -bsf:v hevc_metadata=aud=insert -f hevc - \
+      | TOKEN=$TOKEN natter-whip --codec h265 https://natter.example/whip/v1
+
+It ignores keyframe requests (subscribers wait for the next keyframe) and
+sends no audio.
+
 ## Server API
 
 LiveKit's RoomService at `/twirp/livekit.RoomService/<Rpc>` (Twirp,
