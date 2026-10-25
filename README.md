@@ -10,7 +10,7 @@ and H.265 with resends and keyframe requests, and simulcast with each
 subscriber getting the layer its video size needs (adaptive stream) and
 publishers told which layers anyone watches (dynacast), SVC for VP9 and
 AV1, and congestion control. Beyond media it has LiveKit's server API and
-webhooks, ICE/TCP and TURN fallback, WHIP ingest, agent dispatch and
+webhooks, ICE/TCP and TURN fallback, WHIP ingest and WHEP playback, agent dispatch and
 multi-node rooms over Redis. LiveKit's own SDKs and tools (`lk`,
 `livekit-client`, the Go and Rust SDKs) connect to natter unchanged. The
 web client is Leptos compiled to WASM, speaking the same protocol through
@@ -383,6 +383,32 @@ an Annex-B H.264 or H.265 stream from stdin, e.g. libx265's:
 
 It ignores keyframe requests (subscribers wait for the next keyframe) and
 sends no audio.
+
+## WHEP
+
+`POST /whep/v1` is WHIP the other way, for players (LiveKit has no WHEP):
+the SDP offer's receive-only audio and video m-lines get a participant's
+tracks, `?participant=<identity>` picks whose (without it, any
+participant's, first come first served). The token needs `canSubscribe`
+and the viewer is hidden: no one sees it join. Its m-lines are all it
+gets, as WHEP has no renegotiation: a track waits for a free m-line of
+its kind, and when the participant leaves, the m-line goes quiet until a
+track takes it over (the participant rejoining, or anyone's without
+`participant`), carrying on the same RTP stream. `PATCH` and `DELETE` as
+WHIP's.
+
+```js
+const pc = new RTCPeerConnection();
+pc.addTransceiver('audio', { direction: 'recvonly' });
+pc.addTransceiver('video', { direction: 'recvonly' });
+await pc.setLocalDescription(await pc.createOffer());
+// …wait for ICE gathering to complete, then:
+const r = await fetch('https://natter.example/whep/v1?participant=alice', {
+  method: 'POST', body: pc.localDescription.sdp,
+  headers: { 'Content-Type': 'application/sdp', Authorization: `Bearer ${token}` },
+});
+await pc.setRemoteDescription({ type: 'answer', sdp: await r.text() });
+```
 
 ## Server API
 

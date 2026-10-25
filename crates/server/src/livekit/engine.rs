@@ -289,8 +289,11 @@ pub struct Join {
     pub ice_servers: Vec<lk::IceServer>,
     /// The client can do ICE/TCP (every SDK but Go's).
     pub ice_tcp: bool,
-    /// WHIP: no signalling after the answer (LiveKit's one-shot mode).
+    /// WHIP and WHEP: no signalling after the answer (LiveKit's one-shot
+    /// mode).
     pub one_shot: bool,
+    /// WHEP: auto-subscribe only to this identity's tracks.
+    pub watch: Option<String>,
     /// When its signalling connection was made (LiveKit's session start).
     pub started: Instant,
 }
@@ -559,8 +562,12 @@ struct Participant {
     signal_rtt: Option<Duration>,
     /// Held to ICE/TCP: if ICE hasn't connected by then, TCP failed too.
     tcp_check_by: Option<Instant>,
-    /// WHIP: nothing can be told to it, so it is closed, not resumed.
+    /// WHIP and WHEP: nothing can be told to it, so it is closed, not
+    /// resumed, and (WHEP) the tracks it receives fill the m-lines of its
+    /// one offer, waiting for a free one.
     one_shot: bool,
+    /// WHEP: auto-subscribes only to this identity's tracks.
+    watch: Option<String>,
     /// When its signalling connected, and when it became active.
     started: Instant,
     active_at: Option<Instant>,
@@ -1479,6 +1486,14 @@ impl Engine {
             if let Some(due) = negotiate(p, now) {
                 let conn = p.conn;
                 self.negotiations.push(Reverse((due, conn)));
+            }
+            if p.one_shot
+                && p.downtracks
+                    .iter()
+                    .any(|d| matches!(d.state, DownState::Negotiating(_)))
+            {
+                let pts = negotiated_pts(&p.publisher.rtc);
+                requests::open_negotiated(&self.metrics.lk, p, pts);
             }
         }
         let p = &mut self.participants[i];

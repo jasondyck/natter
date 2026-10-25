@@ -72,6 +72,22 @@ pub fn app(state: AppState, static_dir: &Path) -> Router {
                 .options(livekit::whip::options)
                 .layer(whip_limit),
         )
+        // WHEP: the same sessions, watching.
+        .route(
+            "/whep/v1",
+            axum::routing::post(livekit::whip::create_whep)
+                .get(livekit::whip::get)
+                .options(livekit::whip::options)
+                .layer(whip_limit),
+        )
+        .route(
+            "/whep/v1/{id}",
+            axum::routing::patch(livekit::whip::patch)
+                .delete(livekit::whip::delete)
+                .get(livekit::whip::get)
+                .options(livekit::whip::options)
+                .layer(whip_limit),
+        )
         .route(
             "/api/rtc/token",
             axum::routing::post(livekit::signal::token),

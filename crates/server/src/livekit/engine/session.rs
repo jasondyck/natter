@@ -348,6 +348,7 @@ impl Engine {
             signal_rtt: None,
             tcp_check_by: None,
             one_shot: join.one_shot,
+            watch: join.watch,
             started: join.started,
             active_at: None,
             last_reliable_seq: 0,
@@ -421,7 +422,7 @@ impl Engine {
                 let other = &mut self.participants[i];
                 // Leaving (or replaced by this join): their tracks end
                 // within one housekeeping pass, so don't offer them.
-                if other.closing {
+                if other.closing || p.watch.as_ref().is_some_and(|w| *w != other.identity) {
                     continue;
                 }
                 let refused: Vec<String> = other

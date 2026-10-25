@@ -520,6 +520,7 @@ async fn session(socket: WebSocket, state: RtcState, v: Verified, opts: Opts) {
         ice_servers,
         ice_tcp: opts.ice_tcp,
         one_shot: false,
+        watch: None,
         started,
     };
     if commands.send(Command::Join(Box::new(join))).is_err() {

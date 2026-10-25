@@ -265,7 +265,8 @@ See [`../benchmarks/landscape.md`](../benchmarks/landscape.md).
       LiveKit `/rtc` and str0m's chat example. Results in
       [`../benchmarks`](../benchmarks/README.md)
 - [ ] Adapters for mediasoup, Galène, Janus, WHIP and WHEP
-- [x] WHIP (`/whip/v1`, as LiveKit; phase 7). WHEP not done
+- [x] WHIP (`/whip/v1`, as LiveKit; phase 7). WHEP (`/whep/v1`, natter's
+      own: LiveKit has none; `bench/e2e/whep.mjs`)
 - [ ] Scenario A (audio N↔N) and B (1→N) against the shortlist; C (video)
       after simulcast
 
