@@ -25,10 +25,11 @@ export function token(identity, video, claims = {}, ttl = 3600) {
 /** The usual participant grant for `room`: join, publish, subscribe, data. */
 export const grant = (room, extra = {}) => ({ room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true, ...extra });
 
-/** Headless Chrome with fake media devices. */
+/** Headless Chrome with fake media devices (headed with HEADFUL=1, e.g. in
+ * a virtual compositor for hardware decoding: see h265.sh). */
 export function launch(args = []) {
   return chromium.launch({
-    executablePath: process.env.CHROME, headless: true,
+    executablePath: process.env.CHROME, headless: !process.env.HEADFUL,
     args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required', ...args],
   });
 }
