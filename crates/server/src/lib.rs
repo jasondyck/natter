@@ -4,6 +4,7 @@
 
 mod auth;
 pub mod config;
+mod egress;
 mod http;
 mod livekit;
 mod metrics;
