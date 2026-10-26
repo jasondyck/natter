@@ -80,6 +80,19 @@ impl ToPrimary {
     }
 }
 
+/// The primary block of a RED packet: after the block headers (4 bytes
+/// each, then 1 for the primary's) and the redundant blocks.
+pub fn primary(payload: &[u8]) -> Option<&[u8]> {
+    let mut at = 0;
+    let mut redundant = 0;
+    while payload.get(at)? & 0x80 != 0 {
+        let h = payload.get(at..at + 4)?;
+        redundant += usize::from(h[2] & 0x03) << 8 | usize::from(h[3]);
+        at += 4;
+    }
+    payload.get(at + 1 + redundant..)
+}
+
 fn extract(mut payload: &[u8], recover_bits: u8) -> Option<Vec<Unpacked>> {
     let mut blocks = vec![];
     let mut total = 0;
@@ -162,6 +175,13 @@ mod tests {
         assert_eq!(r.unpack(13, &red(b"p12", b"p13")).len(), 1);
         // Late 11 after recovery is just its primary.
         assert_eq!(r.unpack(11, &red(b"p10", b"p11")).len(), 1);
+    }
+
+    #[test]
+    fn primary_block() {
+        let packet = red(&[1, 2, 3], &[9, 8]);
+        assert_eq!(primary(&packet), Some(&[9u8, 8][..]));
+        assert_eq!(primary(&[0x80 | 111, 0, 0]), None);
     }
 
     #[test]

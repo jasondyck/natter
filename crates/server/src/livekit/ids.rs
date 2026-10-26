@@ -13,6 +13,7 @@ pub const NODE: &str = "ND_";
 pub const AGENT_WORKER: &str = "AW_";
 pub const AGENT_JOB: &str = "AJ_";
 pub const AGENT_DISPATCH: &str = "AD_";
+pub const EGRESS: &str = "EG_";
 
 pub fn new(prefix: &str) -> String {
     let bytes = crate::util::random_bytes::<SIZE>();

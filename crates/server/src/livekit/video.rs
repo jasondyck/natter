@@ -112,6 +112,20 @@ fn vp8_size(p: &[u8]) -> Option<(u32, u32)> {
     if b0 & 0x10 == 0 || b0 & 0x07 != 0 {
         return None;
     }
+    let at = vp8_header_len(p)?;
+    let f = p.get(at..at + 10)?;
+    if f[0] & 0x01 != 0 || f[3..6] != [0x9d, 0x01, 0x2a] {
+        return None;
+    }
+    let w = u32::from(u16::from_le_bytes([f[6], f[7]]) & 0x3fff);
+    let h = u32::from(u16::from_le_bytes([f[8], f[9]]) & 0x3fff);
+    (w > 0 && h > 0).then_some((w, h))
+}
+
+/// The length of a VP8 payload descriptor (RFC 7741 §4.2): where the VP8
+/// data starts.
+pub fn vp8_header_len(p: &[u8]) -> Option<usize> {
+    let b0 = *p.first()?;
     let mut at = 1;
     if b0 & 0x80 != 0 {
         let x = *p.get(at)?;
@@ -127,13 +141,7 @@ fn vp8_size(p: &[u8]) -> Option<(u32, u32)> {
             at += 1;
         }
     }
-    let f = p.get(at..at + 10)?;
-    if f[0] & 0x01 != 0 || f[3..6] != [0x9d, 0x01, 0x2a] {
-        return None;
-    }
-    let w = u32::from(u16::from_le_bytes([f[6], f[7]]) & 0x3fff);
-    let h = u32::from(u16::from_le_bytes([f[8], f[9]]) & 0x3fff);
-    (w > 0 && h > 0).then_some((w, h))
+    (at <= p.len()).then_some(at)
 }
 
 /// The picture size an H.264 SPS describes (ITU-T H.264 §7.3.2.1.1).

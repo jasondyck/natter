@@ -226,3 +226,38 @@ fn webm_video(name: &str, encoder: &str, is_key: fn(&[u8]) -> bool, track: fn(u3
         "{first}"
     );
 }
+
+#[test]
+fn file_paths() {
+    let r = super::Recordings::new("/rec".into(), None);
+    let reps = [("{room_name}", "lobby"), ("{track_id}", "TR_A")];
+    let path = |p: &str| r.file_path(p, "TR_A", &reps, ".ogg");
+    let (full, name) = path("{room_name}/{track_id}").unwrap();
+    assert_eq!(
+        (full.to_str().unwrap(), name.as_str()),
+        ("/rec/lobby/TR_A.ogg", "lobby/TR_A.ogg")
+    );
+    // LiveKit's: a known extension is replaced, another kept.
+    assert_eq!(path("a.mp4").unwrap().1, "a.ogg");
+    assert_eq!(path("a.x").unwrap().1, "a.x.ogg");
+    // No name, or a directory: identifier and time.
+    for (req, prefix) in [("", "TR_A-"), ("d/", "d/TR_A-")] {
+        let name = path(req).unwrap().1;
+        let rest = name.strip_prefix(prefix).unwrap();
+        assert_eq!(
+            (rest.len(), &rest[10..11], &rest[17..]),
+            (21, "T", ".ogg"),
+            "{name}"
+        );
+    }
+    for bad in ["../x", "/etc/x", "a/../../x"] {
+        assert!(path(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn dates() {
+    assert_eq!(super::civil_from_days(0), (1970, 1, 1));
+    assert_eq!(super::civil_from_days(19_723), (2024, 1, 1));
+    assert_eq!(super::civil_from_days(19_782), (2024, 2, 29));
+}

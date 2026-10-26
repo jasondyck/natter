@@ -54,6 +54,8 @@ const CLUSTER_MAX_MS: u64 = 5_000;
 const OPUS_PRE_ROLL_NS: u64 = 80_000_000;
 const OPUS_PRE_SKIP: u16 = 312;
 
+// VP9 and Opus wait on SVC recording and track composite egress.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Track {
     Vp8 { width: u32, height: u32 },

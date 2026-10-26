@@ -71,6 +71,7 @@ mod agents;
 mod allocate;
 mod data;
 mod data_track;
+mod egress;
 mod events;
 mod forward;
 mod negotiate;
@@ -398,6 +399,8 @@ struct Published {
     /// one waiting out the debounce.
     dynacast: [Option<lk::VideoQuality>; 2],
     dynacast_lower: Option<([Option<lk::VideoQuality>; 2], Instant)>,
+    /// Track egress recording it.
+    recorders: Vec<egress::Recorder>,
 }
 
 struct Svc {
@@ -956,6 +959,8 @@ struct Room {
     /// (`sif_trailer`): random, as LiveKit's `RandomSecret`.
     trailer: Vec<u8>,
     agents: agents::RoomAgents,
+    /// A track egress is recording one of its tracks.
+    recording: bool,
 }
 
 impl Room {
@@ -1004,6 +1009,7 @@ impl Room {
                 .take(43)
                 .collect(),
             agents: Default::default(),
+            recording: false,
         }
     }
 
@@ -1024,7 +1030,7 @@ impl Room {
             metadata: self.metadata.clone(),
             num_participants: members().filter(|p| !p.is_dependent()).count() as u32,
             num_publishers: members().filter(|p| p.info().is_publisher).count() as u32,
-            active_recording: members().any(Participant::is_recorder),
+            active_recording: self.recording || members().any(Participant::is_recorder),
             ..Default::default()
         }
     }
@@ -1079,6 +1085,7 @@ pub struct Options {
     pub region: String,
     /// This node's id, shared by its shards.
     pub node_id: String,
+    pub recordings: Arc<crate::egress::Recordings>,
 }
 
 fn enabled_codecs() -> Vec<lk::Codec> {
@@ -1154,6 +1161,7 @@ pub struct Engine {
     /// Server-initiated RPCs (RoomService PerformRpc) awaiting replies.
     rpcs: HashMap<String, admin::PendingRpc>,
     webhooks: Option<Webhooks>,
+    recordings: Arc<crate::egress::Recordings>,
     agents: Agents,
     /// The server is stopping (`AdminOp::Shutdown`): every room closes
     /// (SERVER_SHUTDOWN), joins are refused, and these are answered once
@@ -1211,6 +1219,7 @@ pub fn run(
         region: opts.region,
         rpcs: HashMap::new(),
         webhooks,
+        recordings: opts.recordings,
         agents,
         shutdown: None,
         back,
@@ -1245,6 +1254,7 @@ pub fn run(
             engine.reap(now);
             engine.seed_keyframes(now);
             engine.dynacast(now);
+            engine.check_recording();
             engine.allocate_due(now);
         }
         if engine.reap_soon {

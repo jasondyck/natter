@@ -115,6 +115,7 @@ The variables below are natter's own; they override the config file.
 | `NATTER_UDP_BIND` | `NATTER_PUBLIC_IP` | Address the media socket binds. Use `0.0.0.0` only when the public IP isn't on this host (port forwarding) |
 | `NATTER_ORIGIN` | `http://localhost:8080` | The URL people open. Passkeys are tied to its hostname, so changing it invalidates them |
 | `NATTER_DATA_DIR` | `data` | Holds `natter.redb` (accounts, sessions, invites) |
+| `NATTER_EGRESS_DIR` | `NATTER_DATA_DIR/egress` | Where track egress (LiveKit's `StartTrackEgress`) writes recordings; requested paths are relative to it |
 | `NATTER_STATIC_DIR` | `crates/client/dist` | Built client |
 | `NATTER_SHARDS` | number of cores | Media engines (threads). Engine *n* uses UDP `NATTER_UDP_PORT` + *n*, so open that whole range. Rooms are never split between engines |
 | `NATTER_SHARD_FILL` | `120` | Participants an engine takes before new rooms go to the next; a busy engine is cheaper per packet than several idle ones, but a burst of joins queues on it. Rooms count as at least 8 people until they grow |

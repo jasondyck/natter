@@ -382,6 +382,10 @@ impl Engine {
                         max[k] = max[k].max(d.max_layer);
                     }
                 }
+                // A recording takes the best there is.
+                if !track.recorders.is_empty() {
+                    max[0] = max[0].max(Some(2));
+                }
                 let want = max.map(|m| m.map(|m| video::quality_of(&track.info.layers, m)));
                 let p = &mut self.participants[i];
                 let track = &mut p.published[t];

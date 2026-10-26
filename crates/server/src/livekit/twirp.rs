@@ -111,6 +111,8 @@ reply!(
     PerformRpcResponse,
     AgentDispatch,
     ListAgentDispatchResponse,
+    EgressInfo,
+    ListEgressResponse,
 );
 
 static DESCRIPTORS: LazyLock<DescriptorPool> = LazyLock::new(|| {
@@ -398,6 +400,7 @@ fn request_room(service: &str, method: &str, enc: Encoding, body: &[u8]) -> Opti
         ("RoomService", "SendData") => room!(lk::SendDataRequest, room),
         ("RoomService", "UpdateRoomMetadata") => room!(lk::UpdateRoomMetadataRequest, room),
         ("RoomService", "PerformRpc") => room!(lk::PerformRpcRequest, room),
+        ("Egress", "StartTrackEgress") => room!(lk::TrackEgressRequest, room_name),
         _ => None,
     };
     room.map(|r| (r, false))
@@ -469,6 +472,7 @@ async fn serve(
         }
         match service {
             "RoomService" => dispatch(state, method, enc, headers, &body).await,
+            "Egress" => egress(state, method, enc, headers, &body).await,
             _ => agent_dispatch(state, method, enc, headers, &body).await,
         }
     }
@@ -485,6 +489,104 @@ pub async fn agent_dispatch_service(
     body: Bytes,
 ) -> Response {
     serve(&state, "AgentDispatchService", &method, &headers, body).await
+}
+
+/// `POST /twirp/livekit.Egress/{method}`: LiveKit's egress API, for track
+/// egress (roomRecord). natter records in the server itself, so it needs
+/// no egress service or Redis.
+pub async fn egress_service(
+    State(state): State<RtcState>,
+    Path(method): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    serve(&state, "Egress", &method, &headers, body).await
+}
+
+async fn egress(
+    state: &RtcState,
+    method: &str,
+    enc: Encoding,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<Response, AdminError> {
+    let g = grants(state, headers)?;
+    ensure(g.video.as_ref().is_some_and(|v| v.room_record))?;
+    let not_found = || err("not_found", "egress does not exist");
+    Ok(match method {
+        "StartTrackEgress" => {
+            let req: lk::TrackEgressRequest = decode(enc, body)?;
+            let now = crate::egress::unix_nanos();
+            let info = lk::EgressInfo {
+                egress_id: super::ids::new(super::ids::EGRESS),
+                room_name: req.room_name.clone(),
+                source_type: lk::EgressSourceType::Sdk as i32,
+                status: lk::EgressStatus::EgressStarting as i32,
+                started_at: now,
+                updated_at: now,
+                request: Some(lk::egress_info::Request::Track(req.clone())),
+                ..Default::default()
+            };
+            let reply = in_room(state, &req.room_name, AdminOp::StartTrackEgress(info));
+            answer!(enc, reply.await?, Egress(info) => *info)
+        }
+        "ListEgress" => {
+            let req: lk::ListEgressRequest = decode(enc, body)?;
+            let items = state.recordings.list(&req);
+            if !req.egress_id.is_empty() && items.is_empty() {
+                return Err(not_found());
+            }
+            encode(
+                enc,
+                &lk::ListEgressResponse {
+                    items,
+                    next_page_token: None,
+                },
+            )
+        }
+        "StopEgress" => {
+            let req: lk::StopEgressRequest = decode(enc, body)?;
+            let info = state.recordings.get(&req.egress_id).ok_or_else(not_found)?;
+            if crate::egress::ended(&info) {
+                let status =
+                    lk::EgressStatus::try_from(info.status).map_or("UNKNOWN", |s| s.as_str_name());
+                return Err(err(
+                    "failed_precondition",
+                    format!("egress with status {status} cannot be stopped"),
+                ));
+            }
+            in_room(
+                state,
+                &info.room_name,
+                AdminOp::StopEgress(req.egress_id.clone()),
+            )
+            .await?;
+            // The writer finishes the file now; what it was told so far.
+            let mut info = state.recordings.get(&req.egress_id).ok_or_else(not_found)?;
+            if info.status == lk::EgressStatus::EgressActive as i32 {
+                info.status = lk::EgressStatus::EgressEnding as i32;
+            }
+            encode(enc, &info)
+        }
+        "StartRoomCompositeEgress"
+        | "StartWebEgress"
+        | "StartParticipantEgress"
+        | "StartTrackCompositeEgress"
+        | "StartEgress"
+        | "UpdateLayout"
+        | "UpdateStream" => {
+            return Err(err(
+                "unimplemented",
+                "natter records single tracks only (StartTrackEgress)",
+            ));
+        }
+        _ => {
+            return Err(err(
+                "bad_route",
+                format!("no handler for path \"/twirp/livekit.Egress/{method}\""),
+            ));
+        }
+    })
 }
 
 /// The shard of a room for its dispatches. LiveKit asks the room's node

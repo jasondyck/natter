@@ -51,6 +51,10 @@ pub async fn serve(mut config: Settings) -> Result<()> {
         Some(w) => Some(livekit::webhook::Webhooks::start(w)?),
         None => None,
     };
+    let recordings = Arc::new(crate::egress::Recordings::new(
+        config.egress_dir.clone(),
+        webhooks.clone(),
+    ));
     let keys = Arc::new(api_keys(&config)?);
     // Multi-node: this node joins the others in Redis.
     let cluster = match config.cluster.clone() {
@@ -115,6 +119,7 @@ pub async fn serve(mut config: Settings) -> Result<()> {
             room_defaults: config.rooms,
             region: config.region.clone(),
             node_id: node_id.clone(),
+            recordings: Arc::clone(&recordings),
         };
         let webhooks = webhooks.clone();
         let (agents, back) = (agents.clone(), tx.clone());
@@ -175,6 +180,7 @@ pub async fn serve(mut config: Settings) -> Result<()> {
             metrics: Arc::clone(&metrics),
             next_conn: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             whip: Arc::default(),
+            recordings,
             cluster: cluster.clone(),
         },
         auth,
