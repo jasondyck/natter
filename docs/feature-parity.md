@@ -86,10 +86,10 @@ no browser-to-browser test.
 | | natter | LiveKit | mediasoup | Janus | Galène | Jitsi | MediaMTX |
 |---|---|---|---|---|---|---|---|
 | Uses every core | ✅ engine per core; a room stays on one | ✅ | ✅ worker per core | ✅ threads | ✅ | ✅ | ✅ |
-| Management API | ✅ LiveKit's Twirp (RoomService, AgentDispatch) | ✅ Twirp/HTTP | 🔌 in-process only | ✅ HTTP, WS, MQTT, … | ✅ admin HTTP | 🟡 Colibri REST, off by default | ✅ HTTP |
+| Management API | ✅ LiveKit's Twirp (RoomService, AgentDispatch, Egress) | ✅ Twirp/HTTP | 🔌 in-process only | ✅ HTTP, WS, MQTT, … | ✅ admin HTTP | 🟡 Colibri REST, off by default | ✅ HTTP |
 | Webhooks / events | ✅ LiveKit's, signed | ✅ | ❌ | ✅ event handlers | ❌ | ❔ | 🟡 run commands |
 | Metrics | ✅ Prometheus, incl. LiveKit's names | ✅ Prometheus | 🔌 | ❔ | ❔ | ❔ | ✅ Prometheus |
-| Recording | ❌ | 🔌 Egress | 🔌 RTP to FFmpeg | ✅ `.mjr` files | ✅ to disk | 🔌 Jibri | ✅ |
+| Recording | 🟡 a track to a file, in the server (Opus → Ogg, VP8 → WebM) | 🔌 Egress | 🔌 RTP to FFmpeg | ✅ `.mjr` files | ✅ to disk | 🔌 Jibri | ✅ |
 | RTMP / SRT / RTSP in | ❌ | 🔌 Ingress (RTMP, URL) | 🔌 | 🟡 RTSP, RTP | ❌ | ❌ | ✅ all |
 | SIP telephony | ❌ | 🔌 livekit/sip | ❌ | ✅ SIP plugin | ❌ | 🔌 Jigasi | ❌ |
 | AI agents | 🟡 dispatch and worker protocol; LiveKit Agents workers connect | 🔌 Agents | ❌ | ❌ | ❌ | ❌ | ❌ |
@@ -99,8 +99,11 @@ no browser-to-browser test.
 
 ## What natter won't do
 
-Recording, RTMP/SRT ingest and SIP are separate services in LiveKit
-(Egress, Ingress, SIP) and are out of scope. Agents run in LiveKit's own
+RTMP/SRT ingest and SIP are separate services in LiveKit (Ingress, SIP)
+and are out of scope. Recording is LiveKit's Egress service too, but natter
+records tracks itself: LiveKit's track egress API, without the separate
+service (see [PARITY.md](livekit/PARITY.md), phase 10). Composite
+recordings (a room laid out in a browser, transcoded) aren't planned. Agents run in LiveKit's own
 Agents framework: natter dispatches jobs to its workers, as LiveKit's
 server does, but doesn't host them. Multi-node works as LiveKit's (Redis,
 a room on one node), though it is rarely needed: one server carries 100

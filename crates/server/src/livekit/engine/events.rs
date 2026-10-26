@@ -357,6 +357,7 @@ impl Engine {
             // and no backup until asked.
             dynacast: [Some(lk::VideoQuality::High), None],
             dynacast_lower: None,
+            recorders: vec![],
         });
         p.version += 1;
         let t_index = p.published.len() - 1;

@@ -7,7 +7,11 @@ fn main() {
     let set = protox::Compiler::new(["proto"])
         .and_then(|mut c| {
             c.include_imports(true);
-            c.open_files(["livekit_room.proto", "livekit_agent_dispatch.proto"])?;
+            c.open_files([
+                "livekit_room.proto",
+                "livekit_agent_dispatch.proto",
+                "livekit_egress.proto",
+            ])?;
             Ok(c.encode_file_descriptor_set())
         })
         .expect("compiling proto/livekit_room.proto");

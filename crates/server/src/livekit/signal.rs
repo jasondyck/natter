@@ -59,6 +59,8 @@ pub struct RtcState {
     pub next_conn: Arc<AtomicU64>,
     /// Live WHIP sessions.
     pub whip: Arc<super::whip::Sessions>,
+    /// Track egress, for EgressService.
+    pub recordings: Arc<crate::egress::Recordings>,
 }
 
 impl RtcState {

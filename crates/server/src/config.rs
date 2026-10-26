@@ -606,6 +606,8 @@ pub struct Settings {
     pub static_dir: PathBuf,
     pub origin: Url,
     pub data_dir: PathBuf,
+    /// Where track egress writes its files.
+    pub egress_dir: PathBuf,
     pub max_peers: usize,
     /// RoomService may unmute tracks (LiveKit `room.enable_remote_unmute`).
     pub remote_unmute: bool,
@@ -1225,6 +1227,7 @@ impl Settings {
             notes.push("rtc.node_ip is ignored with rtc.use_external_ip, as in LiveKit".into());
         }
 
+        let data_dir = PathBuf::from(env("NATTER_DATA_DIR").unwrap_or_else(|| "data".into()));
         Ok(Settings {
             http_addrs,
             udp_port,
@@ -1239,9 +1242,9 @@ impl Settings {
                 .into(),
             origin: env_parse("NATTER_ORIGIN")?
                 .unwrap_or_else(|| "http://localhost:8080".parse().expect("valid")),
-            data_dir: env("NATTER_DATA_DIR")
-                .unwrap_or_else(|| "data".into())
-                .into(),
+            data_dir: data_dir.clone(),
+            egress_dir: env("NATTER_EGRESS_DIR")
+                .map_or_else(|| data_dir.join("egress"), PathBuf::from),
             max_peers: env_parse("NATTER_MAX_PEERS")?.unwrap_or(200),
             remote_unmute: env_parse("NATTER_REMOTE_UNMUTE")?
                 .unwrap_or(lk.room.enable_remote_unmute.unwrap_or(false)),

@@ -31,6 +31,9 @@ pub enum AdminOp {
     CreateDispatch(lk::AgentDispatch),
     DeleteDispatch(lk::DeleteAgentDispatchRequest),
     ListDispatch(lk::ListAgentDispatchRequest),
+    /// Record a track: the egress as created (STARTING, with its request).
+    StartTrackEgress(lk::EgressInfo),
+    StopEgress(String),
     /// The server is stopping: close every room (SERVER_SHUTDOWN), and
     /// answer once they have all gone.
     Shutdown,
@@ -46,6 +49,7 @@ pub enum AdminReply {
     Rpc(String),
     Dispatch(lk::AgentDispatch),
     Dispatches(Vec<lk::AgentDispatch>),
+    Egress(Box<lk::EgressInfo>),
     Done,
 }
 
@@ -193,6 +197,8 @@ impl Engine {
             AdminOp::CreateDispatch(d) => self.create_dispatch(d),
             AdminOp::DeleteDispatch(req) => self.delete_dispatch(req),
             AdminOp::ListDispatch(req) => self.list_dispatch(&req),
+            AdminOp::StartTrackEgress(info) => self.start_track_egress(info),
+            AdminOp::StopEgress(id) => self.stop_egress(&id),
             AdminOp::Shutdown => {
                 info!(rooms = self.rooms.len(), "shutting down");
                 // Answered by `reap` once the rooms have gone.

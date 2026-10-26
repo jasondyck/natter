@@ -56,6 +56,10 @@ pub fn app(state: AppState, static_dir: &Path) -> Router {
             "/twirp/livekit.AgentDispatchService/{method}",
             axum::routing::post(livekit::twirp::agent_dispatch_service),
         )
+        .route(
+            "/twirp/livekit.Egress/{method}",
+            axum::routing::post(livekit::twirp::egress_service),
+        )
         // Native WHIP, as LiveKit's.
         .route(
             "/whip/v1",

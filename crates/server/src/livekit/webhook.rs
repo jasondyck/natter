@@ -59,6 +59,9 @@ pub const TRACK_UNPUBLISHED: &str = "track_unpublished";
 /// Stoat's fork only (see the module docs).
 pub const TRACK_MUTED: &str = "track_muted";
 pub const TRACK_UNMUTED: &str = "track_unmuted";
+pub const EGRESS_STARTED: &str = "egress_started";
+pub const EGRESS_UPDATED: &str = "egress_updated";
+pub const EGRESS_ENDED: &str = "egress_ended";
 
 pub struct Config {
     pub urls: Vec<String>,

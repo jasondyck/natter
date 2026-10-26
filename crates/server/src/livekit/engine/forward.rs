@@ -68,6 +68,10 @@ impl Engine {
                 .level
                 .observe(level.unsigned_abs().min(127), pkt.header.timestamp, now);
         }
+        if !track.recorders.is_empty() {
+            self.record_audio(i, t_index, &pkt);
+        }
+        let track = &mut self.participants[i].published[t_index];
         if track.subscribers.is_empty() {
             return;
         }
@@ -344,6 +348,9 @@ impl Engine {
             p.version += 1;
             info!(identity = %p.identity, track = %track.info.sid, "video size from media");
             self.participant_update(&room, i);
+        }
+        if !self.participants[i].published[t_index].recorders.is_empty() {
+            self.record_video(i, t_index, rid, codec, &pkt, now);
         }
         let p = &mut self.participants[i];
         let track = &mut p.published[t_index];

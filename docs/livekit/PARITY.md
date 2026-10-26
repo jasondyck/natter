@@ -3,8 +3,8 @@
 Goal: natter is a drop-in replacement for the open-source LiveKit server
 v1.13.10 core SFU. LiveKit's own SDKs (JS, Swift, Kotlin, Flutter, Rust,
 Unity), `lk` and its load tester connect to natter unchanged and get the
-same behaviour. Egress, Ingress, SIP and hosting agents come later, if
-ever.
+same behaviour. Track egress is built in (phase 10); Ingress, SIP and
+hosting agents come later, if ever.
 
 Reference material in this directory, all from the v1.13.10 tag and the
 `livekit/protocol` commit it pins (`9bb708cdb819`):
@@ -610,6 +610,56 @@ track and LOW for the other, no loss.
       (`bench/cluster/`). Not done: Redis TLS, Sentinel and Cluster; a
       draining node waiting for its rooms to end (it leaves at once)
 
+### 10. Recording (track egress)
+
+LiveKit records through Egress, a separate service (GStreamer, headless
+Chrome) that joins rooms over WebRTC and takes its work from Redis. natter
+records in the server: the engine hands a recorded track's packets to a
+writer thread over a bounded channel (`egress/track.rs`), so the media
+thread never waits on a disk. The API is LiveKit's, so server SDKs and
+`lk egress` work unchanged.
+
+- [x] `livekit.Egress` over Twirp with roomRecord: `StartTrackEgress` to a
+      file, `ListEgress` (by room, id, active), `StopEgress` (a stopped or
+      ended egress is `failed_precondition`, as LiveKit). The other Start
+      calls, `UpdateLayout` and `UpdateStream` are `unimplemented`
+- [x] Files as LiveKit's track egress writes them, without transcoding:
+      Opus (RED as its primary) to Ogg, VP8 to WebM, with pure-Rust
+      muxers (`egress/ogg.rs`, `egress/webm.rs`). Ogg fills gaps (DTX,
+      mutes, loss) with silent frames so the file keeps the call's
+      timeline; WebM gets Cues and its duration, so it seeks. Video takes
+      the best simulcast layer from a keyframe and follows it as it
+      changes, keeping one stream; lost packets are waited for 300 ms
+      (NACK), then the writer waits for a keyframe and asks for one
+- [x] `EgressInfo` as LiveKit's: `EG_` ids, STARTING → ACTIVE (first
+      media in the file) → ENDING → COMPLETE, ABORTED when nothing was
+      written, FAILED on a write error; `details` with LiveKit's end
+      reasons ("StopEgress API", "Source closed"); `file_results` (and the
+      deprecated `file`) with filename, times, duration, size and
+      location; `egress_started`/`egress_updated`/`egress_ended` webhooks
+      on the same transitions as LiveKit's `IOInfoService`; ended egress
+      listed for 24 h
+- [x] File paths: LiveKit's placeholders (`{room_name}`, `{room_id}`,
+      `{track_id}`, `{track_type}`, `{track_source}`,
+      `{publisher_identity}`), its default name (`{track_id}-{time}`) for an
+      empty path or one ending in `/`, its extension handling; always under
+      `NATTER_EGRESS_DIR`, never absolute or with `..`
+- [x] The room's `active_recording` while a track is recorded (as when
+      LiveKit's egress participant is in it); a recorded track's
+      publisher is told someone wants its best layer (dynacast)
+- [x] Verified: `bench/e2e/egress.mjs` (a JS SDK publisher's microphone
+      and 720p simulcast camera, 2 s muted mid-way; one stopped by the
+      API, one by unpublishing): statuses, webhooks, errors, and files that
+      ffmpeg decodes without an error, as long as the recording; and
+      `lk egress start --type track`, `lk egress list`, `lk egress stop`
+      (protobuf) against natter
+- [ ] H.264 and AV1 to MP4, VP9 (SVC: all spatial layers as superframes)
+- [ ] Cloud upload (S3, GCS, Azure, OSS), websocket output, auto egress
+      (`RoomEgress` on CreateRoom), `TrackCompositeEgress` without
+      transcoding (Opus + VP8 in one WebM)
+- [ ] Multi-node: `StartTrackEgress` goes to the room's node, but
+      `ListEgress` and `StopEgress` only see the node they reach
+
 ## Deliberate differences
 
 - Congestion control takes a layer only when it costs more than the one
@@ -632,6 +682,10 @@ track and LOW for the other, no loss.
 - `Room.turn_password` is empty. LiveKit fills it with a random secret it
   never reads.
 - `enabled_codecs` has no PCMU/PCMA: natter doesn't forward them.
+- Track egress records in the server, not in a separate Egress service
+  that joins over WebRTC, so it needs no Redis or egress process, and a
+  request for a track that doesn't exist fails at once (`not_found`)
+  rather than as an egress that never starts.
 - Data-track packets are dropped by the same rule and constants as
   LiveKit's (100 ms at the drain rate, 8 KiB floor), but the drain rate
   needs 100 ms of backlog to exist. On an idle, fast link pion's SCTP
