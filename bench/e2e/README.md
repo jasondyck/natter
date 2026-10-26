@@ -23,6 +23,7 @@ browser, RoomService calls, the webhook receiver) is in `lib.mjs`.
 | `joindata.mjs` | Reliable data to a participant while it joins |
 | `sstate.mjs` | `stream_state_update` around first subscribe, publisher mute/unmute and subscriber disable/enable |
 | `shutdown.mjs` | Stopping the server mid-call: what clients are told and the webhooks that follow (`CONFIG=shutdown.yaml`) |
+| `unpublish.mjs` | Unpublishing one track of several: the others still reach subscribers and the server stays up |
 | `leave.mjs` | How soon the others hear a participant left (`ParticipantDisconnected`, track unsubscribed), in ms, five times |
 | `mutes.mjs` | `track_muted`/`track_unmuted` webhooks from the client and an admin, against Stoat's LiveKit fork (`CONFIG=shutdown.yaml`, `LK_IMAGE=ghcr.io/stoatchat/livekit-server:v1.9.14`; natter with `NATTER_WEBHOOK_TRACK_MUTES=1`) |
 | `fps.mjs` | Temporal layers by `setVideoFPS`, and spatial switches meanwhile: the subscriber's decoded frame rate, height and freezes (`CODEC=vp8\|vp9\|av1\|h264`; `NO_DD=1` takes the dependency descriptor out of the SDP, so VP8 carries TID and PictureID) |

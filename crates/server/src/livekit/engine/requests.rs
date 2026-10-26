@@ -446,6 +446,8 @@ impl Engine {
         let Some(removed) = removed else {
             return;
         };
+        // It holds indices into `published`: built again as packets come.
+        p.ssrc_track.clear();
         let who = p.who();
         info!(identity = %p.identity, track = %sid, tell, "unpublished");
         if tell {
