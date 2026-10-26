@@ -36,6 +36,9 @@ pub struct Ctx {
     /// (`UpdateTrackSettings` by size, as the SDKs' adaptive stream).
     pub sub_quality: Option<u8>,
     pub workers: Vec<Worker>,
+    /// Set when the run is over: every client leaves, as clients do,
+    /// rather than vanishing.
+    pub leaving: tokio::sync::watch::Sender<bool>,
     next: AtomicUsize,
 }
 
@@ -55,6 +58,7 @@ impl Ctx {
             video_bps,
             sub_quality,
             workers,
+            leaving: tokio::sync::watch::Sender::new(false),
             next: AtomicUsize::new(0),
         })
     }
