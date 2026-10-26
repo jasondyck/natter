@@ -79,7 +79,7 @@ no browser-to-browser test.
 | Built-in TURN | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ (coturn) | ❌ |
 | End-to-end encryption pass-through | ✅ incl. packet trailers | ✅ | 🟡 works, undocumented | ✅ | ❌ | ✅ | – |
 | WHIP ingest | ✅ | ✅ `/whip/v1` (🔌 Ingress to transcode) | ❌ | 🔌 simple-whip-server | ✅ | ❌ | ✅ |
-| WHEP playback | 🔜 | ❌ | ❌ | 🔌 simple-whep-server | ❌ | ❌ | ✅ |
+| WHEP playback | ✅ one participant or the room | ❌ | ❌ | 🔌 simple-whep-server | ❌ | ❌ | ✅ |
 
 ## Server and operations
 

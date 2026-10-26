@@ -6,6 +6,11 @@
 //! nothing is ever offered to it, and when its transport fails it is
 //! closed, as there is no one to tell. PATCH trickles candidates or, with
 //! `If-Match: *`, restarts ICE; DELETE ends it.
+//!
+//! WHEP (RFC 9725's playback twin, `/whep/v1`; LiveKit has none) is the
+//! same session the other way: a hidden participant subscribed to one
+//! participant's tracks (`?participant=`; everyone's without it), which fill
+//! the receive-only m-lines of its offer as they come and go.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -72,7 +77,25 @@ fn cors(resp: &mut Response) {
     );
 }
 
-/// `OPTIONS /whip/v1[/…]`: CORS preflight.
+/// Which way a session's media goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// WHIP: the client publishes.
+    Ingest,
+    /// WHEP: the client watches.
+    Egress,
+}
+
+impl Mode {
+    fn path(self) -> &'static str {
+        match self {
+            Mode::Ingest => "/whip/v1",
+            Mode::Egress => "/whep/v1",
+        }
+    }
+}
+
+/// `OPTIONS /whip/v1[/…]`, `/whep/v1[/…]`: CORS preflight.
 pub async fn options() -> Response {
     let mut resp = StatusCode::OK.into_response();
     cors(&mut resp);
@@ -221,6 +244,42 @@ pub async fn create(
     uri: axum::http::Uri,
     body: Bytes,
 ) -> Response {
+    start(state, query, headers, uri, body, Mode::Ingest).await
+}
+
+/// `POST /whep/v1[?participant=<identity>]`: as WHIP, for watching.
+pub async fn create_whep(
+    State(state): State<RtcState>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    start(state, query, headers, uri, body, Mode::Egress).await
+}
+
+/// The receive-only audio and video m-lines a WHEP client offers.
+fn recv_sections(sdp: &str) -> usize {
+    super::sdp::sections(sdp)
+        .filter(|section| {
+            let mut lines = section.lines().map(str::trim_end);
+            let media = lines
+                .next()
+                .and_then(|l| l.strip_prefix("m="))
+                .and_then(|l| l.split_whitespace().next());
+            matches!(media, Some("audio" | "video")) && lines.any(|l| l == "a=recvonly")
+        })
+        .count()
+}
+
+async fn start(
+    state: RtcState,
+    query: HashMap<String, String>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+    mode: Mode,
+) -> Response {
     if content_type(&headers) != "application/sdp" {
         return error(
             StatusCode::BAD_REQUEST,
@@ -239,7 +298,7 @@ pub async fn create(
             state.auto_create || v.grants.video.as_ref().is_some_and(|g| g.room_create);
         match c.route(&v.room, may_create).await {
             Ok(super::cluster::Route::Remote(node)) => {
-                let path = uri.path_and_query().map_or("/whip/v1", |p| p.as_str());
+                let path = uri.path_and_query().map_or(mode.path(), |p| p.as_str());
                 return c
                     .forward(&node, axum::http::Method::POST, path, &headers, body)
                     .await;
@@ -263,8 +322,20 @@ pub async fn create(
     if let Err(e) = str0m::change::SdpOffer::from_sdp_string(&offer) {
         return error(StatusCode::BAD_REQUEST, format!("malformed SDP offer: {e}"));
     }
+    let mut grant = v.grants.video.clone().unwrap_or_default();
+    if mode == Mode::Egress {
+        if !grant.can_subscribe() {
+            return error(StatusCode::UNAUTHORIZED, "permissions denied");
+        }
+        if recv_sections(&offer) == 0 {
+            return error(StatusCode::BAD_REQUEST, "SDP offer receives no media");
+        }
+        // A viewer, not a member: the others don't see it.
+        grant.hidden = true;
+        grant.can_publish = Some(false);
+    }
 
-    debug!(room = %v.room, identity = %v.grants.identity, %offer, "WHIP offer");
+    debug!(room = %v.room, identity = %v.grants.identity, ?mode, %offer, "WHIP offer");
     let shard = state.engine.placement.join(&v.room);
     let s = &state.engine.shards[shard];
     let (commands, advertised, tcp, media) =
@@ -294,10 +365,11 @@ pub async fn create(
         attributes: g.attributes.clone(),
         kind: lk::participant_info::Kind::from_str_name(&g.kind.to_ascii_uppercase())
             .unwrap_or(lk::participant_info::Kind::Standard),
-        grant: g.video.clone().unwrap_or_default(),
+        grant,
         room_config: g.room_config.clone(),
-        // Nothing can be offered to a one-shot participant.
-        auto_subscribe: false,
+        // Nothing can be offered to a one-shot participant: WHEP fills
+        // the m-lines it offered.
+        auto_subscribe: mode == Mode::Egress,
         auto_subscribe_data: false,
         adaptive_stream: false,
         congestion: media.congestion,
@@ -311,15 +383,22 @@ pub async fn create(
         ice_servers: ice_servers.clone(),
         ice_tcp: true,
         one_shot: true,
+        watch: query
+            .get("participant")
+            .filter(|_| mode == Mode::Egress)
+            .cloned(),
         started: std::time::Instant::now(),
     };
     if commands.send(Command::Join(Box::new(join))).is_err() {
         state.engine.placement.leave(&v.room);
         return error(StatusCode::SERVICE_UNAVAILABLE, "media engine unavailable");
     }
-    let tracks = add_tracks(&offer)
-        .into_iter()
-        .map(signal_request::Message::AddTrack);
+    let tracks = match mode {
+        Mode::Ingest => add_tracks(&offer),
+        Mode::Egress => vec![],
+    }
+    .into_iter()
+    .map(signal_request::Message::AddTrack);
     let sd = signal_request::Message::Offer(lk::SessionDescription {
         r#type: "offer".into(),
         sdp: offer.clone(),
@@ -346,7 +425,11 @@ pub async fn create(
     let Ok(Some((sid, answer))) = waited else {
         let leave = signal_request::Message::Leave(Default::default());
         send_signals(&commands, conn, [leave]);
-        return error(StatusCode::SERVICE_UNAVAILABLE, "could not publish");
+        let what = match mode {
+            Mode::Ingest => "could not publish",
+            Mode::Egress => "could not subscribe",
+        };
+        return error(StatusCode::SERVICE_UNAVAILABLE, what);
     };
     let ufrag = ice_attr(&answer, "ice-ufrag")
         .unwrap_or_default()
@@ -378,14 +461,14 @@ pub async fn create(
         sessions.0.lock().unwrap().remove(&drained_sid);
         debug!(sid = %drained_sid, "WHIP session ended");
     });
-    info!(room = %v.room, identity = %g.identity, %sid, "WHIP session");
+    info!(room = %v.room, identity = %g.identity, %sid, ?mode, "WHIP session");
     if let Some(c) = &state.cluster {
         c.set_whip(&sid).await;
     }
 
     let mut resp = sdp_response(StatusCode::CREATED, answer, "application/sdp", &ufrag);
     let h = resp.headers_mut();
-    if let Ok(v) = HeaderValue::from_str(&format!("/whip/v1/{sid}")) {
+    if let Ok(v) = HeaderValue::from_str(&format!("{}/{sid}", mode.path())) {
         h.insert(header::LOCATION, v);
     }
     for link in link_headers(&ice_servers) {
@@ -673,6 +756,12 @@ mod tests {
             .map(|l| (l.quality, l.rid.as_str()))
             .collect();
         assert_eq!(q, [(0, "q"), (1, "h"), (2, "f")]);
+    }
+
+    #[test]
+    fn whep_offers_receive() {
+        assert_eq!(recv_sections(OFFER), 1, "only the receive-only video");
+        assert_eq!(Mode::Egress.path(), "/whep/v1");
     }
 
     #[test]

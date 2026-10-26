@@ -198,7 +198,11 @@ impl Engine {
                         sdp = crate::livekit::sdp::prefer_codec(&sdp, mid, name);
                     }
                 }
-                if p.single_pc() {
+                // One-shot (WHEP): every m-line stays open, as there is no
+                // later offer to open one in; tracks fill them as they come.
+                if p.one_shot {
+                    self.touched.push((i, Side::Subscriber));
+                } else if p.single_pc() {
                     let used: HashSet<Mid> = p
                         .downtracks
                         .iter()
@@ -689,7 +693,7 @@ impl Engine {
 /// A subscription is up: LiveKit's subscribe counter and time.
 /// The subscriber side's answer is in: what it negotiated opens, what it
 /// stopped goes.
-fn open_negotiated(
+pub(super) fn open_negotiated(
     lk: &crate::livekit::prom::LkMetrics,
     p: &mut Participant,
     (opus_pt, red_pt): (Option<Pt>, Option<Pt>),

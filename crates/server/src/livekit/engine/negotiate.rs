@@ -64,7 +64,9 @@ pub(super) fn negotiate(p: &mut Participant, now: Instant) -> Option<Instant> {
         return None;
     }
     let before = (p.sub_offer_id, p.reoffer_requested);
-    if p.single_pc() {
+    if p.one_shot {
+        fill_slots(p);
+    } else if p.single_pc() {
         negotiate_single(p);
     } else {
         negotiate_dual(p);
@@ -137,6 +139,30 @@ fn negotiate_dual(p: &mut Participant) {
     }
     p.restart_ice = false;
     p.send_sub_offer(offer, pending, mid_to_track_id, Instant::now());
+}
+
+/// One-shot (WHEP): the client's one offer is all there is, so its
+/// receive-only m-lines are filled without renegotiating: a stopped track
+/// frees its m-line, and a new one takes a free m-line of its kind or waits
+/// for one. The engine then opens them (`open_negotiated`), carrying on
+/// each m-line's stream (`mid_sent`).
+fn fill_slots(p: &mut Participant) {
+    p.downtracks
+        .retain(|d| !matches!(d.state, DownState::ToStop(_)));
+    for k in 0..p.downtracks.len() {
+        if p.downtracks[k].state != DownState::ToOpen {
+            continue;
+        }
+        let kind = p.downtracks[k].kind;
+        let used: HashSet<Mid> = p.downtracks.iter().filter_map(|d| d.state.mid()).collect();
+        if let Some(&(mid, _)) = p
+            .slots
+            .iter()
+            .find(|(m, kd)| *kd == kind && !used.contains(m))
+        {
+            p.downtracks[k].state = DownState::Negotiating(mid);
+        }
+    }
 }
 
 /// Single-PC: the client makes every offer, so forwarded tracks go out on

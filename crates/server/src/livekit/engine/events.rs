@@ -403,7 +403,11 @@ impl Engine {
             }
             let (auto, can, conn) = {
                 let s = &self.participants[j];
-                (s.auto_subscribe, s.grant.can_subscribe(), s.conn)
+                let watched = s
+                    .watch
+                    .as_ref()
+                    .is_none_or(|w| *w == self.participants[i].identity);
+                (s.auto_subscribe && watched, s.grant.can_subscribe(), s.conn)
             };
             if !auto || !can {
                 continue;
