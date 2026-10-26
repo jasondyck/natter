@@ -926,28 +926,36 @@ impl Settings {
         };
 
         // The advertised address, and where media binds.
-        let public_ip = match env_parse("NATTER_PUBLIC_IP")? {
-            Some(ip) => ip,
+        // `explicit`: the operator named the address, so it must be bound.
+        let (public_ip, explicit) = match env_parse("NATTER_PUBLIC_IP")? {
+            Some(ip) => (ip, true),
             None => match (&lk.rtc.node_ip, lk.rtc.use_external_ip) {
-                (Some(ip), false) => node_ip(ip)?,
+                (Some(ip), false) => (node_ip(ip)?, true),
                 (_, true) => {
                     let servers: Vec<String> = match &lk.rtc.stun_servers {
                         Some(s) if !s.is_empty() => s.clone(),
                         _ => DEFAULT_STUN.iter().map(|s| s.to_string()).collect(),
                     };
-                    external_ip(&servers).context("could not determine the external IP")?
+                    let ip =
+                        external_ip(&servers).context("could not determine the external IP")?;
+                    (ip, false)
                 }
-                (None, false) => default_route_ip()?,
+                (None, false) => (default_route_ip()?, false),
             },
         };
         // Binding the advertised address, not 0.0.0.0, makes replies
         // leave from it. Otherwise a multi-homed host can answer from
         // another interface's address and browsers drop the packets. An
         // address not on this host (behind NAT) can't be bound: use the
-        // local one on the default route.
+        // local one on the default route. Not for a configured address:
+        // one missing at boot (a VPN not up yet) would otherwise bind
+        // another interface for good, so fail and let the service retry.
         let udp_bind = match env_parse("NATTER_UDP_BIND")? {
             Some(ip) => ip,
             None if UdpSocket::bind((public_ip, 0)).is_ok() => public_ip,
+            None if explicit => bail!(
+                "{public_ip} is not on this host (yet?); set NATTER_UDP_BIND=0.0.0.0 if it is a NAT address"
+            ),
             None => default_route_ip()?,
         };
 
