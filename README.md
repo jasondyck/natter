@@ -112,7 +112,7 @@ The variables below are natter's own; they override the config file.
 | `NATTER_TURN_TLS` | none | TURN over TLS, as advertised: `domain:port`, e.g. `natter.example.com:443` |
 | `NATTER_TURN_CERT`, `NATTER_TURN_KEY` | none | PEM certificate chain and key for natter to terminate TURN/TLS itself on `NATTER_TURN_TLS`'s port (needs a build with `--features tls`). Without them, terminate TLS in front of natter and forward it to `NATTER_TURN_PORT` over TCP |
 | `NATTER_PUBLIC_IP` | default-route IP | Address browsers send media to. Set it to the IP clients reach this host on |
-| `NATTER_UDP_BIND` | `NATTER_PUBLIC_IP` | Address the media socket binds. Use `0.0.0.0` only when the public IP isn't on this host (port forwarding) |
+| `NATTER_UDP_BIND` | `NATTER_PUBLIC_IP` | Address the media socket binds. Use `0.0.0.0` only when the public IP isn't on this host (port forwarding): with `NATTER_PUBLIC_IP` set to an address not on this host, natter will not start without it |
 | `NATTER_ORIGIN` | `http://localhost:8080` | The URL people open. Passkeys are tied to its hostname, so changing it invalidates them |
 | `NATTER_DATA_DIR` | `data` | Holds `natter.redb` (accounts, sessions, invites) |
 | `NATTER_STATIC_DIR` | `crates/client/dist` | Built client |
