@@ -54,7 +54,7 @@ tower-http = { version = "0.6", features = ["fs", "set-header", "trace"] }
 # Its RustCrypto provider, with P-256 signatures on p256 0.14 (precomputed
 # tables; dimpl itself is on 0.13), see livekit::dtls_crypto; or, built with
 # the `aws-lc` feature, its aws-lc one (NATTER_DTLS_CRYPTO=aws-lc).
-dimpl = { version = "0.7", default-features = false, features = ["rust-crypto"] }
+dimpl = { version = "0.9", default-features = false, features = ["rust-crypto"] }
 # With the `aws-lc` feature: SRTP on it (livekit::srtp_aws_lc).
 aws-lc-rs = { version = "1", optional = true, default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }
 der = "0.7"

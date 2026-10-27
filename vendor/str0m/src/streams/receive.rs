@@ -6,6 +6,7 @@ use crate::config_mod::RtcpReportIntervals;
 use crate::media::KeyframeRequestKind;
 use crate::packet::MAX_RED_RECOVERY_DEPTH;
 use crate::rtp_::MidRid;
+use crate::rtp_::SeqNoWindow;
 use crate::rtp_::{Bitrate, DlrrItem, ExtendedReport, extend_u32};
 use crate::rtp_::{Fir, FirEntry, Frequency, MediaTime, Remb};
 use crate::rtp_::{Mid, Pli, Pt, ReceiverReport};
@@ -74,10 +75,10 @@ pub struct StreamRx {
     /// Set on first ever packet.
     register: Option<ReceiverRegister>,
 
-    /// Register of received packets for RTX.
+    /// Sequence and replay tracking for RTX. NACKs and reception reports use the main register.
     ///
-    /// Set on first ever RTXpacket.
-    register_rtx: Option<ReceiverRegister>,
+    /// Set on the first authenticated RTX packet or restored from remembered sequence history.
+    register_rtx: Option<SeqNoWindow>,
 
     /// The most recent main-stream packets as `(seq_no, extended rtp time)`, used to place
     /// RFC 2198 RED redundant blocks (which carry a timestamp, not a seq no) at the right
@@ -237,11 +238,6 @@ impl StreamRx {
         self.last_time
     }
 
-    /// natter: a keyframe or REMB request waits for the next timeout.
-    pub(crate) fn has_pending_request(&self) -> bool {
-        self.pending_request_keyframe.is_some() || self.pending_request_remb.is_some()
-    }
-
     /// Request a keyframe for an incoming encoded stream.
     ///
     /// * SSRC the identifier of the remote encoded stream to request a keyframe for.
@@ -347,6 +343,10 @@ impl StreamRx {
         self.check_paused_at
     }
 
+    pub(crate) fn has_pending_request(&self) -> bool {
+        self.pending_request_keyframe.is_some() || self.pending_request_remb.is_some()
+    }
+
     pub(crate) fn handle_timeout(&mut self, now: Instant) {
         // No scheduled paused check?
         if self.check_paused_at.is_none() {
@@ -372,29 +372,25 @@ impl StreamRx {
         is_repair: bool,
         max_seq_lookup: impl Fn(Ssrc) -> Option<SeqNo>,
     ) -> SeqNo {
-        // Select reference to register to use depending on RTX or not. The RTX has a separate
-        // sequence number series to the main register.
-        let register_ref = if is_repair {
-            &mut self.register_rtx
-        } else {
-            &mut self.register
-        };
+        // RTX has its own sequence series and only needs a replay window.
+        if is_repair {
+            if self.register_rtx.is_none() {
+                self.register_rtx = max_seq_lookup(header.ssrc).map(SeqNoWindow::new_after);
+            }
+            return header.sequence_number(self.register_rtx.as_ref().map(|r| r.max_seq()));
+        }
 
-        let register =
-        {
-            let max_nacks = self.max_nacks;
-            register_ref
-                .get_or_insert_with(|| ReceiverRegister::new(max_seq_lookup(header.ssrc), max_nacks))
-        };
+        let max_nacks = self.max_nacks;
+        let register = self
+            .register
+            .get_or_insert_with(|| ReceiverRegister::new(max_seq_lookup(header.ssrc), max_nacks));
 
         // If the user has called `reset_seq_no`, this is the time to handle it, but only
         // if the incoming packet is for main (not repair).
         let mut reset_seq_no = None;
-        if !is_repair {
-            if let Some(reset_roc) = self.reset_roc.take() {
-                let s: SeqNo = (reset_roc << 16 | header.sequence_number as u64).into();
-                reset_seq_no = Some(s);
-            }
+        if let Some(reset_roc) = self.reset_roc.take() {
+            let s: SeqNo = (reset_roc << 16 | header.sequence_number as u64).into();
+            reset_seq_no = Some(s);
         }
 
         if let Some(reset_seq_no) = reset_seq_no {
@@ -405,14 +401,12 @@ impl StreamRx {
     }
 
     pub(crate) fn is_new_packet(&self, is_repair: bool, seq_no: SeqNo) -> bool {
-        let register_ref = if is_repair {
-            self.register_rtx.as_ref()
+        if is_repair {
+            self.register_rtx.as_ref().is_none_or(|r| r.accepts(seq_no))
         } else {
-            self.register.as_ref()
-        };
-
-        // Unwrap is OK because we always call extend_seq() for the same is_repair flag beforehand
-        register_ref.unwrap().accepts(seq_no)
+            // extend_seq() initializes the main register before this check.
+            self.register.as_ref().unwrap().accepts(seq_no)
+        }
     }
 
     fn remember_recent(&mut self, seq_no: SeqNo, time: u64) {
@@ -493,7 +487,7 @@ impl StreamRx {
             }
             let d = span_time / span_seq;
             let back = block_time - l_time;
-            if back % d != 0 {
+            if !back.is_multiple_of(d) {
                 return None;
             }
             let seq: SeqNo = (l_seq + back / d).into();
@@ -536,16 +530,19 @@ impl StreamRx {
         }
         self.check_paused_at = Some(now + self.pause_threshold);
 
-        let register_ref = if is_repair {
-            &mut self.register_rtx
+        let is_new_packet = if is_repair {
+            let is_new = self.is_new_packet(true, seq_no);
+            self.register_rtx
+                .get_or_insert_with(|| SeqNoWindow::new(seq_no))
+                .update(seq_no);
+            is_new
         } else {
-            &mut self.register
+            // extend_seq() initializes the main register before this update.
+            self.register
+                .as_mut()
+                .unwrap()
+                .update(seq_no, now, header.timestamp, clock_rate.get())
         };
-
-        // Unwrap is OK because we always call extend_seq() for the same is_repair flag beforehand
-        let register = register_ref.as_mut().unwrap();
-
-        let is_new_packet = register.update(seq_no, now, header.timestamp, clock_rate.get());
 
         // Get the previous time for comparison
         let previous_time = self.last_time.map(|t| t.numer());
@@ -802,14 +799,44 @@ impl StreamRx {
         }
     }
 
+    pub(crate) fn recovery_deadline(
+        &self,
+        range: std::ops::Range<SeqNo>,
+        received: Instant,
+    ) -> Option<Instant> {
+        if !self.suppress_nack {
+            if let Some(register) = &self.register {
+                return register.recovery_deadline(range, received, self.stats.rtt);
+            }
+        }
+        let rtt = self.stats.rtt.unwrap_or(super::register_nack::DEFAULT_RTT);
+        received.checked_add(rtt.saturating_mul(3))
+    }
+
+    /// Whether this stream should keep its NACK timer active.
+    ///
+    /// Paused streams finish pending retries before disabling NACK reports.
     pub(crate) fn nack_enabled(&self) -> bool {
         // Deliberately don't look at RTX is_some() here, since when using dynamic SSRC, we might need
         // to send NACK before discovering the remote RTX.
-        !self.suppress_nack
+        if self.suppress_nack {
+            return false;
+        }
+
+        if !self.paused {
+            return true;
+        }
+
+        let Some(register) = &self.register else {
+            return false;
+        };
+
+        register.has_pending_nacks()
     }
 
     pub(crate) fn maybe_create_nack(
         &mut self,
+        now: Instant,
         sender_ssrc: Ssrc,
         feedback: &mut VecDeque<Rtcp>,
     ) -> Option<()> {
@@ -817,7 +844,10 @@ impl StreamRx {
             return None;
         }
 
-        let nacks = self.register.as_mut().and_then(|r| r.nack_report())?;
+        let nacks = self
+            .register
+            .as_mut()
+            .and_then(|r| r.nack_report(now, self.stats.rtt))?;
 
         for mut nack in nacks {
             nack.sender_ssrc = sender_ssrc;
@@ -883,8 +913,11 @@ impl StreamRx {
             r.clear(max_seq_lookup(self.ssrc), self.max_nacks);
         }
 
-        if let Some(r) = &mut self.register_rtx {
-            r.clear(self.rtx.and_then(max_seq_lookup), self.max_nacks);
+        if self.register_rtx.is_some() {
+            self.register_rtx = self
+                .rtx
+                .and_then(max_seq_lookup)
+                .map(SeqNoWindow::new_after);
         }
         self.pending_request_keyframe = None;
     }
@@ -946,6 +979,10 @@ impl StreamRx {
     ///
     /// This is used in scenarios where we use a single sequence number across all
     /// receivers of the same stream (as opposed to a sequence number unique per peer).
+    ///
+    /// The ROC is not carried in the RTP header. Obtain it through out-of-band
+    /// signaling and call this before handling the first SRTP packet for the stream.
+    /// See [`RtpWrite::new`][crate::rtp::RtpWrite::new] for sender and receiver examples.
     ///
     /// [RFC3711](https://datatracker.ietf.org/doc/html/rfc3711#section-3.3.1):
     ///
@@ -1078,6 +1115,120 @@ mod tests {
     }
 
     #[test]
+    fn dlrr_for_local_ssrc_updates_receive_streams() {
+        let mut streams = crate::streams::Streams::new(
+            false,
+            1200,
+            Duration::from_millis(1500),
+            crate::streams::register_nack::MAX_NACKS,
+        );
+        for (ssrc, mid) in [(7, "video"), (8, "audio")] {
+            streams.expect_stream_rx(ssrc.into(), None, MidRid(mid.into(), None), false);
+        }
+        let default_ssrc = streams.first_ssrc_local();
+        streams.declare_stream_tx(9.into(), None, MidRid("send".into(), None));
+        let now = Instant::now();
+        let last_rr_time = ((now - Duration::from_millis(250))
+            .to_system_time()
+            .as_ntp_64()
+            >> 16) as u32;
+
+        // Ignore a sub-block addressed to the remote media source instead of us.
+        streams.handle_dlrr(
+            now,
+            DlrrItem {
+                ssrc: 7.into(),
+                last_rr_time,
+                last_rr_delay: 3276,
+            },
+        );
+        assert_eq!(streams.stream_rx(&7.into()).unwrap().stats.rtt, None);
+
+        // Accept both an active sender and the fallback SSRC used before it existed.
+        for local_ssrc in [9.into(), default_ssrc] {
+            for ssrc in [7, 8] {
+                streams.stream_rx(&ssrc.into()).unwrap().stats.rtt = None;
+            }
+            streams.handle_dlrr(
+                now,
+                DlrrItem {
+                    ssrc: local_ssrc,
+                    last_rr_time,
+                    last_rr_delay: 3276,
+                },
+            );
+            for ssrc in [7, 8] {
+                let rtt = streams.stream_rx(&ssrc.into()).unwrap().stats.rtt.unwrap();
+                assert!((Duration::from_millis(199)..=Duration::from_millis(201)).contains(&rtt));
+            }
+        }
+    }
+
+    #[test]
+    fn nack_retries_use_receive_stream_rtt() {
+        for rtt in [Duration::from_millis(20), Duration::from_millis(250)] {
+            let mut stream = stream_with(&[(10, 0), (12, 1920)]);
+            stream.stats.rtt = Some(rtt);
+            let now = Instant::now();
+            let mut feedback = VecDeque::new();
+            assert!(
+                stream
+                    .maybe_create_nack(now, 1.into(), &mut feedback)
+                    .is_some()
+            );
+            let due = now + rtt + Duration::from_millis(5);
+            assert!(
+                stream
+                    .maybe_create_nack(due - Duration::from_nanos(1), 1.into(), &mut feedback)
+                    .is_none()
+            );
+            assert_eq!(feedback.len(), 1);
+            assert!(
+                stream
+                    .maybe_create_nack(due, 1.into(), &mut feedback)
+                    .is_some()
+            );
+            assert_eq!(feedback.len(), 2);
+        }
+    }
+
+    #[test]
+    fn paused_stream_finishes_pending_nack_retries() {
+        let mut stream = stream_with(&[(10, 0), (12, 1920)]);
+        let mut now = stream.paused_at().unwrap();
+        stream.handle_timeout(now);
+        assert!(stream.paused);
+
+        let mut feedback = VecDeque::new();
+        for _ in 0..5 {
+            assert!(stream.nack_enabled());
+            assert!(
+                stream
+                    .maybe_create_nack(now, 1.into(), &mut feedback)
+                    .is_some()
+            );
+            assert!(
+                stream
+                    .maybe_create_nack(now, 1.into(), &mut feedback)
+                    .is_none()
+            );
+            now += Duration::from_millis(105);
+        }
+        assert_eq!(feedback.len(), 5);
+        assert!(feedback.iter().all(|rtcp| {
+            matches!(rtcp, Rtcp::Nack(nack) if nack.reports.len() == 1 && nack.reports[0].pid == 11)
+        }));
+
+        assert!(!stream.nack_enabled());
+        assert!(
+            stream
+                .maybe_create_nack(now, 1.into(), &mut feedback)
+                .is_none()
+        );
+        assert_eq!(feedback.len(), 5);
+    }
+
+    #[test]
     fn red_locate_seq_single_hole_regardless_of_frame_duration() {
         // 20 ms frames, then a 40 ms frame at seq 12, then 20 ms again. Seq 13 lost.
         let stream = stream_with(&[(10, 0), (11, 960), (12, 1920), (14, 4800)]);
@@ -1107,6 +1258,13 @@ mod tests {
     #[test]
     fn red_locate_seq_rejects_known_and_recovered_frames() {
         let mut stream = stream_with(&[(10, 0), (14, 3840)]);
+        let now = Instant::now();
+        let mut feedback = VecDeque::new();
+        assert!(
+            stream
+                .maybe_create_nack(now, 1.into(), &mut feedback)
+                .is_some()
+        );
 
         // A block for a frame we already have is not a recovery.
         assert_eq!(stream.red_locate_seq(14.into(), 0), None);
@@ -1120,7 +1278,7 @@ mod tests {
             .register
             .as_mut()
             .unwrap()
-            .nack_report()
+            .nack_report(now + Duration::from_millis(105), None)
             .into_iter()
             .flatten()
             .flat_map(|n| {
@@ -1165,5 +1323,130 @@ mod tests {
             }),
             now + Duration::from_millis(750)
         );
+    }
+
+    #[test]
+    fn rtx_tracks_rollover_and_reordering_only_after_receipt() {
+        let mut stream = rtx_stream();
+        let header = rtx_header(8, 50000);
+        stream.extend_seq(&header, true, |_| None);
+        assert!(
+            stream.register_rtx.is_none(),
+            "unverified headers must not advance the window"
+        );
+
+        for seq in [65535, 65536, 65538, 65537] {
+            record_rtx(&mut stream, seq);
+            assert!(!stream.is_new_packet(true, seq.into()));
+        }
+        assert!(
+            stream.register.is_none(),
+            "RTX must not update primary reception reports"
+        );
+        let mut feedback = VecDeque::new();
+        assert!(
+            stream
+                .maybe_create_nack(Instant::now(), 1.into(), &mut feedback)
+                .is_none()
+        );
+        assert!(feedback.is_empty());
+    }
+
+    #[test]
+    fn rtx_uses_the_full_128_position_window() {
+        let mut stream = rtx_stream();
+        record_rtx(&mut stream, 0);
+        record_rtx(&mut stream, 200);
+        assert!(!stream.is_new_packet(true, 72.into()));
+        assert!(stream.is_new_packet(true, 73.into()));
+        record_rtx(&mut stream, 73);
+        assert!(!stream.is_new_packet(true, 73.into()));
+    }
+
+    #[test]
+    fn rtx_buffer_and_roc_resets_preserve_remembered_replay_floor() {
+        let mut stream = rtx_stream();
+        record_rtx(&mut stream, 65535);
+        record_rtx(&mut stream, 65537);
+        assert!(stream.is_new_packet(true, 65536.into()));
+        let history = |ssrc| (ssrc == 8.into()).then_some(65537.into());
+        stream.reset_buffers(history);
+        assert!(!stream.is_new_packet(true, 65536.into()));
+        assert!(!stream.is_new_packet(true, 65537.into()));
+
+        stream.reset_roc(5);
+        let header = rtx_header(8, 2);
+        assert_eq!(stream.extend_seq(&header, true, history), 65538.into());
+        assert!(!stream.is_new_packet(true, 65536.into()));
+        assert!(stream.is_new_packet(true, 65538.into()));
+        // The requested ROC applies to the main stream, not the RTX sequence series.
+        let main = RtpHeader {
+            ssrc: 7.into(),
+            sequence_number: 10,
+            ..Default::default()
+        };
+        assert_eq!(
+            stream.extend_seq(&main, false, history),
+            ((5u64 << 16) + 10).into()
+        );
+    }
+
+    #[test]
+    fn rtx_ssrc_changes_restore_history_and_main_changes_preserve_it() {
+        let mut stream = rtx_stream();
+        record_rtx(&mut stream, 65535);
+        assert!(stream.change_ssrc(9.into()));
+        assert!(!stream.is_new_packet(true, 65535.into()));
+        stream.maybe_reset_rtx(8.into());
+        assert!(!stream.is_new_packet(true, 65535.into()));
+
+        stream.maybe_reset_rtx(10.into());
+        assert!(stream.register_rtx.is_none());
+        record_rtx(&mut stream, 0);
+        stream.maybe_reset_rtx(8.into());
+        let header = rtx_header(8, 0);
+        let seq = stream.extend_seq(&header, true, |ssrc| {
+            (ssrc == 8.into()).then_some(65535.into())
+        });
+        assert_eq!(seq, 65536.into());
+        assert!(!stream.is_new_packet(true, 65534.into()));
+        assert!(!stream.is_new_packet(true, 65535.into()));
+        assert!(stream.is_new_packet(true, seq));
+        record_rtx(&mut stream, 65536);
+    }
+
+    fn rtx_stream() -> StreamRx {
+        let mut stream = StreamRx::new(
+            7.into(),
+            MidRid("mid".into(), None),
+            false,
+            Duration::from_millis(1500),
+        );
+        stream.maybe_reset_rtx(8.into());
+        stream
+    }
+
+    fn record_rtx(stream: &mut StreamRx, seq: u64) {
+        let header = rtx_header(*stream.rtx().unwrap(), seq as u16);
+        let extended = stream.extend_seq(&header, true, |_| None);
+        assert_eq!(extended, seq.into());
+        assert!(stream.is_new_packet(true, extended));
+        let receipt = stream.update_register(
+            already_happened(),
+            &header,
+            Frequency::NINETY_KHZ,
+            true,
+            extended,
+        );
+        assert!(receipt.is_new_packet);
+    }
+
+    fn rtx_header(ssrc: u32, seq: u16) -> RtpHeader {
+        RtpHeader {
+            ssrc: ssrc.into(),
+            sequence_number: seq,
+            payload_type: 97.into(),
+            ..Default::default()
+        }
     }
 }

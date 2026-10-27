@@ -48,12 +48,12 @@ pub struct RtcConfig {
     pub(crate) reordering_size_audio: usize,
     pub(crate) reordering_size_video: usize,
     pub(crate) reordering_timeout_audio: Option<Duration>,
-    pub(crate) reordering_timeout_video: Option<Duration>,
     pub(crate) pause_threshold: Duration,
     pub(crate) nack_retries: u8,
     pub(crate) send_buffer_audio: usize,
     pub(crate) send_buffer_video: usize,
     pub(crate) sctp_max_buffered_amount: usize,
+    pub(crate) sctp_max_message_size: u32,
     pub(crate) rtp_mode: bool,
     pub(crate) enable_raw_packets: bool,
     pub(crate) twcc_feedback_events: bool,
@@ -317,6 +317,14 @@ impl RtcConfig {
         self
     }
 
+    /// Enable AMR-WB audio codec.
+    ///
+    /// Disabled by default.
+    pub fn enable_amr_wb(mut self, enabled: bool) -> Self {
+        self.codec_config.enable_amr_wb(enabled);
+        self
+    }
+
     /// Enable VP8 video codec.
     ///
     /// Enabled by default.
@@ -561,6 +569,11 @@ impl RtcConfig {
     /// WARNING: video is very different to audio. Setting this value too low will result in
     /// missing video data. The 0 (as described for audio) is not relevant for video.
     ///
+    /// Video recovery waits for a complete successor and missing packets' NACK attempts
+    /// plus three RTTs. When NACK timing is unavailable, it waits three RTTs from the
+    /// complete candidate's earliest receipt instead (100 ms RTT until measured).
+    /// An incomplete frame without a complete successor has no age deadline.
+    ///
     /// Default: 30
     ///
     /// This setting is ignored in [RTP mode][`RtcConfig::set_rtp_mode()`] where RTP
@@ -585,38 +598,6 @@ impl RtcConfig {
     /// packets can arrive out of order.
     pub fn reordering_size_video(&self) -> usize {
         self.reordering_size_video
-    }
-
-    /// Sets how long the oldest video frame may wait to finish or for missing earlier packets.
-    ///
-    /// Frames are considered in sequence order. Each deadline starts when that frame's first
-    /// packet arrives. On expiry, an incomplete frame is dropped; a complete frame can move
-    /// past a gap. Later frames remain buffered with their own deadlines. Reordering or RTX
-    /// can complete a frame before its deadline. The existing frame count limit can release
-    /// complete frames earlier.
-    ///
-    /// The default is 2 seconds. `None` disables this deadline and keeps count-based waiting
-    /// only. `Some(Duration::ZERO)` expires an incomplete frame immediately. This setting
-    /// applies to video streams in frame mode, not audio or
-    /// [`RTP mode`](RtcConfig::set_rtp_mode).
-    pub fn set_reordering_timeout_video(mut self, timeout: Option<Duration>) -> Self {
-        self.reordering_timeout_video = timeout;
-        self
-    }
-
-    /// Returns the configured video reordering timeout.
-    ///
-    /// ```
-    /// # use str0m::Rtc;
-    /// let config = Rtc::builder();
-    ///
-    /// // Defaults to 2 seconds.
-    /// assert_eq!(config.reordering_timeout_video(), Some(std::time::Duration::from_secs(2)));
-    /// ```
-    ///
-    /// `Some(Duration::ZERO)` is preserved distinctly from `None`.
-    pub fn reordering_timeout_video(&self) -> Option<Duration> {
-        self.reordering_timeout_video
     }
 
     /// Sets how long an incoming stream may receive no packets before it is reported paused.
@@ -741,6 +722,35 @@ impl RtcConfig {
     /// ```
     pub fn sctp_max_buffered_amount(&self) -> usize {
         self.sctp_max_buffered_amount
+    }
+
+    /// Sets the maximum data channel message size this peer can receive, in bytes.
+    ///
+    /// This limit is advertised in SDP as `a=max-message-size` and applied to SCTP,
+    /// including when using the direct API or SNAP. It does not change the remote
+    /// peer's receive limit or the local send buffer limit.
+    ///
+    /// The SCTP receive storage budget is at least 1 MiB and large enough to
+    /// reassemble one message at this limit. Storage is allocated as data arrives.
+    ///
+    /// A value of 0 advertises unlimited message size, subject to local capacity.
+    /// Internally, both the message limit and receive storage budget are `u32::MAX`.
+    ///
+    /// Defaults to 256 KiB.
+    pub fn set_sctp_max_message_size(mut self, bytes: u32) -> Self {
+        self.sctp_max_message_size = bytes;
+        self
+    }
+
+    /// Returns the maximum data channel message size this peer can receive, in bytes.
+    ///
+    /// ```
+    /// # use str0m::RtcConfig;
+    /// let config = RtcConfig::new().set_sctp_max_message_size(512 * 1024);
+    /// assert_eq!(config.sctp_max_message_size(), 512 * 1024);
+    /// ```
+    pub fn sctp_max_message_size(&self) -> u32 {
+        self.sctp_max_message_size
     }
 
     /// Make the entire Rtc be in RTP mode.
@@ -926,12 +936,12 @@ impl Default for RtcConfig {
             reordering_size_audio: 15,
             reordering_size_video: 30,
             reordering_timeout_audio: Some(Duration::from_secs(1)),
-            reordering_timeout_video: Some(Duration::from_secs(2)),
             pause_threshold: Duration::from_millis(1500),
             nack_retries: crate::streams::register_nack::MAX_NACKS,
             send_buffer_audio: 50,
             send_buffer_video: 1000,
             sctp_max_buffered_amount: crate::sctp::DEFAULT_MAX_BUFFERED_AMOUNT,
+            sctp_max_message_size: crate::sctp::LOCAL_MAX_MESSAGE_SIZE,
             rtp_mode: false,
             enable_raw_packets: false,
             twcc_feedback_events: false,
@@ -946,6 +956,18 @@ impl Default for RtcConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sctp_max_message_size_round_trips() {
+        assert_eq!(
+            RtcConfig::default().sctp_max_message_size(),
+            crate::sctp::LOCAL_MAX_MESSAGE_SIZE
+        );
+        for bytes in [0, 32 * 1024, 512 * 1024, u32::MAX] {
+            let config = RtcConfig::new().set_sctp_max_message_size(bytes);
+            assert_eq!(config.clone().sctp_max_message_size(), bytes);
+        }
+    }
 
     #[test]
     fn enable_comfort_noise_updates_codec_config() {

@@ -9,16 +9,22 @@ readme = "README.md"
 edition = "2024"
 
 # MSRV
-rust-version = "1.85.0"
+rust-version = "1.89.0"
 
 [dependencies]
 str0m-proto = { workspace = true, features = ["dtls"] }
-dimpl = { workspace = true, features = ["rust-crypto", "rcgen"] }
+# No "rcgen" (it builds on aws-lc): certificates come from cert.rs.
+dimpl = { workspace = true, features = ["rust-crypto"] }
 time.workspace = true
 hmac.workspace = true
 aes-gcm.workspace = true
 aes.workspace = true
 ctr.workspace = true
-p256.workspace = true
+p256 = { workspace = true, features = ["ecdsa", "pkcs8"] }
 sha1.workspace = true
 sha2.workspace = true
+# cert.rs builds its certificate from struct literals, which x509-cert 0.3 made private.
+der = { version = "0.7", features = ["alloc", "oid"] }
+spki = { version = "0.7", features = ["alloc"] }
+x509-cert = { version = "0.2", default-features = false }
+getrandom = "0.4"

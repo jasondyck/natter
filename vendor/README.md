@@ -1,10 +1,20 @@
 # Vendored crates
 
-## str0m 0.24.1
+## str0m (upstream main, after 0.24.1)
 
-From crates.io, wired in with `[patch.crates-io]` in the workspace
-`Cargo.toml`. The first commit touching `vendor/str0m` is the crate as
-published (minus its tests and examples); everything after it is ours.
+From [algesten/str0m](https://github.com/algesten/str0m) main at `dc317173`
+(unreleased: still versioned 0.24.1) with the patches below, wired in with
+`[patch.crates-io]` in the workspace `Cargo.toml`. The patches live as one
+commit each on a branch of a str0m clone, rebased onto upstream; this
+directory is that branch packaged with `cargo package` (`str0m`, `is`,
+`str0m-rust-crypto`, `str0m-proto`). After extracting a new package, touch
+its files: `tar` keeps the packaged mtimes and cargo would reuse the old
+build.
+
+Upstreamed since 0.24.1, so no longer patched here: a negotiated RED listed
+before its primary (#1117), SDP parsed without `easy` errors first (#1118),
+TWCC reports finding their first record by binary search (#1116), and
+rejected m-lines keeping a `0` format.
 
 ### Patch: audio NACK without RTX
 
@@ -25,22 +35,15 @@ like (see the root README's load-testing section).
   payload type whether a packet can be resent.
 
 RED packets stay unnackable, as upstream and as LiveKit: RED carries its own
-redundancy.
+redundancy. Upstream has an open PR for the same (#980), to be reworked after
+it separates "RTX" from "resend" in its naming.
 
 Audio `nack` is now intersected with the remote's, like `transport-cc`
 (`PayloadParams::update_param`). Upstream echoes it in answers whatever the
 offer said; Chrome never offers it for Opus, so we'd cache packets for NACKs
 that never come.
 
-### Patch: RED listed before its primary
-
-A browser sends with the first codec the other side lists. Upstream always
-lists the primary (`111 63`), so Chrome sent plain Opus even when it
-preferred RED. A negotiated RED now comes first (`63 111`), as LiveKit
-answers (`change/sdp.rs`). RED is only kept when both sides offer it, so
-peers without RED are unaffected.
-
-Not filed upstream. Drop this copy once str0m resends audio in place.
+Not filed upstream (see #980). Drop this copy once str0m resends audio in place.
 
 ### Patch: `Rtc::set_msid`
 
@@ -49,13 +52,6 @@ the client offers receive-only m-lines and the server, as answerer, starts
 sending a track on one of them; the answer's msid (`PA_…|TR_…`) is how the
 client learns whose track it is. Upstream only sets msid when it creates
 the line.
-
-### Patch: rejected m-lines keep a format
-
-An m-line with no codec in common (say video, offered by a client before
-natter forwards video) was written as `m=video 0 UDP/TLS/RTP/SAVPF ` with
-an empty format list, which Chrome rejects for the whole answer. It now
-lists `0`, as RFC 8866 requires at least one format.
 
 ### Patch: ICE upkeep only when due
 
@@ -104,6 +100,11 @@ of video frames lost through LiveKit at 5% loss, against 0.04% with 10
 tries. The limit is now per `Rtc` (`config.rs`, carried through
 `streams/mod.rs` and `receive.rs` into `register_nack.rs`); the default
 stays 5. natter-load sets 10.
+
+Upstream now spaces retries by the receive stream's RTT plus 5 ms (100 ms
+before an RTT is known, #1070), still at most 5. On a short round trip
+that is 5 tries in a few tens of ms, inside LiveKit's 100 ms resend window,
+so the per-`Rtc` limit stays, applied on top of upstream's spacing.
 
 ### Patch: resends limited per packet
 
@@ -169,18 +170,6 @@ retransmit by them (`streams/send_stats.rs`, `stats.rs`).
 Its expectations followed upstream's TWCC on audio; updated for the
 video-only patch above.
 
-### Patch: SDP parsed without `easy` errors first
-
-`Sdp::parse` used `combine`'s `easy_parse`, which allocates, merges and
-dedups an error for every alternative it tries: most of the cost of
-parsing a valid SDP, and a join parses at least one. It now parses with
-plain `&str` errors, which cost nothing, and only parses again with
-`easy_parse` for the message when the input is invalid. A 13 KB Chrome
-offer (audio, simulcast video, data channel, 72 candidates): 2.2 ms →
-0.34 ms; a small Firefox offer 152 → 25 µs. The parsed result is the same
-(compared by serialising both). `natter-server`'s ignored `parse_timing`
-test measures it.
-
 ### Patch: `RtcConfig::set_ice_ufrag_prefix`
 
 natter serves ICE/TCP for all its engines on one port, as LiveKit does, and
@@ -205,7 +194,19 @@ whose open is being retried keeps it walking. 100 audio rooms: 13.3 →
 12.0 µs of CPU per forwarded packet (−10%); the data-channel e2e
 scenarios (data, RPC, streams, replay, data tracks, resume) unchanged.
 
+Upstream's readiness gate (#1011) skips SCTP too, but only when nothing at
+all changed since the last `poll_output`. An SFU writes media between
+almost every poll, so the gate rarely holds and this flag still does the
+work (without it, SCTP was ~5.5% of an engine forwarding audio).
+
 ### Patch: send-only timeouts (`Rtc::handle_send_timeout`)
+
+Ported onto upstream's readiness gate (#1011): the fast path arms the
+readiness after stamping writes (transmits to poll, the pacer's deadline
+moved), and `non_send_at` is recorded whenever `poll_output` works the
+timeout out again. The gate and the NullPacer drain (#1112) do not cover
+this: without it, audio at 100 rooms cost 12.7 µs of CPU per forwarded
+packet against 8.6 µs.
 
 A written packet only reaches the pacer through a timeout: the stream
 timestamps it and the pacer takes a fresh look at the queues there. And
@@ -242,14 +243,6 @@ engine. It is now worked out once per full `handle_timeout` and kept
 follows. Audio, 100 rooms: 10.8 → 10.4 µs of CPU per forward; the
 congestion grid as before.
 
-### Patch: TWCC reports find their first record by binary search
-
-`TwccSendRegister::apply_report` found where a report starts by walking
-the register (1000 records, in sequence order) from its oldest record,
-on every TWCC report. It binary-searches instead, as the same function
-already did a few lines later. Video, 15 rooms: −0.9% instructions,
-31.6 → 30.8 µs of CPU per forward.
-
 ### Patch: pacer bursts without a timeout per packet
 
 The leaky-bucket pacer let one packet out per `handle_timeout`: after
@@ -267,9 +260,29 @@ instructions, 32.1 → 28.2 µs of CPU per forward, latency p50 0.31 →
 0 ms cell over 12 runs each) and Chrome through a thin link
 (`bench/e2e/thin`) as before.
 
+### str0m's own tests
+
+Run in the str0m clone, these fail with the patches above and pass on
+upstream main. All are expected:
+
+- `answer_remaps` and seven `ssrc-zero-probe` tests: TWCC on video only
+  (they expect it on audio, or probing from audio).
+- Three `tele` (DTMF) tests: the test harness moves the clock 10 ms per
+  immediate timeout and str0m packetizes one frame-mode payload per
+  timeout, so 150 payloads/s queue up; TWCC's timers on audio used to add
+  enough timeouts. natter forwards in RTP mode and sends no DTMF.
+- `contiguous_all_the_way`, `not_contiguous`: with the `is` patches the
+  last frame is still in flight at the test's single final drain (more
+  drains pass).
+- `loss_heavy` (103 of 104 at ~10% bursty loss): the per-packet resend
+  limit.
+- `initial_exponential_probes_3x_and_6x`, `minimum_fills_media_gaps…`,
+  `minimum_improves_recovery…`, `bwe_cellular`: pacing at 2.5 ×, ALR probes
+  every 3 s, no estimator without TWCC.
+
 ## is 0.11.1
 
-str0m's ICE agent, vendored the same way (first commit as published).
+str0m's ICE agent, from the same upstream main (`crates/is`).
 
 ### Patch: a nomination skips the queue at once
 
@@ -298,8 +311,8 @@ these patches and still does.
 
 ## str0m-rust-crypto 0.6.0
 
-str0m's RustCrypto backend, vendored the same way (first commit as
-published).
+str0m's RustCrypto backend, from the same upstream main
+(`crypto/rust-crypto`).
 
 ### Patch: certificates without rcgen
 
@@ -307,7 +320,9 @@ Upstream makes the self-signed DTLS certificate with dimpl's `rcgen`
 feature, and rcgen builds on aws-lc: the only C in the stack. `cert.rs`
 makes the same certificate (P-256 ECDSA with SHA-256, `O=DTLS, CN=DTLS
 Peer`, a year's validity, a random positive 128-bit serial) with p256 0.14
-and x509-cert; its tests check it is self-signed and that dimpl accepts it.
+and x509-cert 0.2 (0.3, which the rest of upstream's workspace uses, made
+the certificate's fields private); its tests check it is self-signed and
+that dimpl accepts it.
 natter generates one per process (`rtc_config::certificate`), as mediasoup
 and Janus do, instead of one per peer connection.
 

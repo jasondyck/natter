@@ -58,6 +58,7 @@ const STARTUP_PHASE: Duration = Duration::from_secs(2);
 pub struct Bwe {
     bwe: SendSideBandwidthEstimator,
     desired_bitrate: Bitrate,
+    minimum_bitrate: Bitrate,
     smoother: EstimateSmoother,
 }
 
@@ -67,6 +68,7 @@ impl Bwe {
         Bwe {
             bwe: send_side_bwe,
             desired_bitrate: Bitrate::ZERO,
+            minimum_bitrate: Bitrate::ZERO,
             smoother: EstimateSmoother::new(),
         }
     }
@@ -122,8 +124,13 @@ impl Bwe {
         self.bwe.is_overusing()
     }
 
-    pub fn set_desired_bitrate(&mut self, v: Bitrate) {
-        self.desired_bitrate = v;
+    pub fn set_bitrate(&mut self, minimum: Bitrate, desired: Bitrate) {
+        self.minimum_bitrate = minimum.min(desired);
+        self.desired_bitrate = desired;
+    }
+
+    pub fn minimum_bitrate(&self) -> Bitrate {
+        self.minimum_bitrate
     }
 }
 
@@ -133,6 +140,7 @@ struct SendSideBandwidthEstimator {
     acked_bitrate_estimator: AckedBitrateEstimator,
     probe_control: ProbeControl,
     probe_estimator: ProbeEstimator,
+    // First nonempty transport feedback; starts loss estimation and enables ALR probing.
     started_at: Option<Instant>,
     alr_detector: AlrDetector,
     link_capacity_estimator: LinkCapacityEstimator,
@@ -181,9 +189,11 @@ impl SendSideBandwidthEstimator {
 
     /// Record a packet from a TWCC report.
     pub fn update<'t>(&mut self, records: impl Iterator<Item = &'t TwccSendRecord>, now: Instant) {
-        let _ = self.started_at.get_or_insert(now);
-
         let send_records: Vec<_> = records.collect();
+        if send_records.is_empty() {
+            return;
+        }
+        let _ = self.started_at.get_or_insert(now);
 
         // Feed records to probe estimator for analysis and process any new probe results
         let mut latest_probe_result = None;
@@ -306,7 +316,8 @@ impl SendSideBandwidthEstimator {
 
         // Get ALR state and forward to both probe control and loss controller
         let alr_start_time = self.alr_detector.alr_start_time();
-        if let Some(t) = alr_start_time {
+        // ALR probing requires feedback for at least one sent packet.
+        if let Some(t) = alr_start_time.filter(|_| self.started_at.is_some()) {
             self.probe_control.set_alr_start_time(t);
         } else {
             self.probe_control.set_alr_stop_time(now);
@@ -490,5 +501,77 @@ impl fmt::Display for BandwidthUsage {
             BandwidthUsage::Normal => write!(f, "normal"),
             BandwidthUsage::Underuse => write!(f, "underuse"),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::rtp_::TwccPacketId;
+
+    #[test]
+    fn alr_probing_waits_for_nonempty_transport_feedback() {
+        let start = Instant::now();
+        let desired = Bitrate::mbps(3);
+        let mut bwe = SendSideBandwidthEstimator::new(Bitrate::kbps(300));
+
+        // Initial discovery must work before feedback or media exists.
+        assert!(bwe.handle_timeout(desired, true, start).is_some());
+        assert!(bwe.handle_timeout(desired, true, start).is_some());
+        for second in 1..=7 {
+            let now = start + Duration::from_secs(second);
+            bwe.update(std::iter::empty(), now);
+            assert!(
+                bwe.handle_timeout(desired, true, now).is_none(),
+                "empty feedback must not authorize periodic ALR probes"
+            );
+        }
+        assert!(bwe.alr_detector.alr_start_time().is_some());
+        assert!(bwe.started_at.is_none());
+
+        // Feedback for an actual sent packet authorizes ALR discovery.
+        let now = start + Duration::from_secs(8);
+        let record = TwccSendRecord::test_new(
+            TwccPacketId::new(1u64),
+            now - Duration::from_millis(20),
+            240,
+            now,
+            Some(now - Duration::from_millis(10)),
+        );
+        bwe.update(std::iter::once(&record), now);
+        let probe = bwe.handle_timeout(desired, true, now).unwrap();
+        assert!(probe.is_alr_probe());
+
+        // A reset starts discovery afresh, including the feedback requirement.
+        bwe.reset(Bitrate::kbps(300));
+        assert!(bwe.handle_timeout(desired, true, now).is_some());
+        assert!(bwe.handle_timeout(desired, true, now).is_some());
+        for second in 1..=7 {
+            assert!(
+                bwe.handle_timeout(desired, true, now + Duration::from_secs(second))
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn bitrate_targets_survive_estimator_reset() {
+        let mut bwe = Bwe::new(Bitrate::kbps(300));
+        bwe.set_bitrate(Bitrate::kbps(800), Bitrate::mbps(3));
+        bwe.reset(Bitrate::kbps(200));
+        assert_eq!(bwe.minimum_bitrate(), Bitrate::kbps(800));
+        assert_eq!(bwe.desired_bitrate, Bitrate::mbps(3));
+        assert_eq!(bwe.last_estimate(), Some(Bitrate::kbps(200)));
+    }
+
+    #[test]
+    fn minimum_is_clamped_to_desired_and_can_be_cleared() {
+        let mut bwe = Bwe::new(Bitrate::kbps(300));
+        bwe.set_bitrate(Bitrate::mbps(2), Bitrate::mbps(1));
+        assert_eq!(bwe.minimum_bitrate(), Bitrate::mbps(1));
+        assert_eq!(bwe.desired_bitrate, Bitrate::mbps(1));
+        bwe.set_bitrate(Bitrate::ZERO, Bitrate::mbps(1));
+        assert_eq!(bwe.minimum_bitrate(), Bitrate::ZERO);
+        assert_eq!(bwe.desired_bitrate, Bitrate::mbps(1));
     }
 }
