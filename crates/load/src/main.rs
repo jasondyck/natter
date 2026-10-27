@@ -489,7 +489,10 @@ async fn run(args: Args) -> anyhow::Result<()> {
         std::fs::write(path, serde_json::to_vec_pretty(&results)?)
             .with_context(|| format!("writing {}", path.display()))?;
     }
-    // Clients' background tasks and media threads would run on.
+    // Every client leaves, then the process ends: clients' background
+    // tasks and media threads would run on.
+    ctx.leaving.send_replace(true);
+    tokio::time::sleep(Duration::from_millis(500)).await;
     std::process::exit(0);
 }
 

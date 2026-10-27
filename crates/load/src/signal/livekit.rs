@@ -174,8 +174,18 @@ struct Session {
 impl Session {
     async fn run(&mut self, mut ws: Ws, ping: Duration) -> anyhow::Result<()> {
         let mut pings = tokio::time::interval(ping);
+        let mut leaving = self.ctx.leaving.subscribe();
         loop {
             tokio::select! {
+                _ = leaving.changed() => {
+                    let leave = lk::LeaveRequest {
+                        reason: lk::DisconnectReason::ClientInitiated as i32,
+                        ..Default::default()
+                    };
+                    send(&mut ws, signal_request::Message::Leave(leave)).await?;
+                    let _ = ws.close(None).await;
+                    return Ok(());
+                }
                 msg = recv(&mut ws) => {
                     let Some(msg) = msg? else { continue };
                     if let Some(reply) = self.handle(msg).await? {
