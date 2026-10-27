@@ -342,7 +342,7 @@ impl Engine {
         if p.congestion == Congestion::Twcc {
             let side = p.sending_side();
             let t = sub!(p);
-            t.rtc.bwe().set_desired_bitrate(Bitrate::bps(goal));
+            t.rtc.bwe().set_bitrate(Bitrate::ZERO, Bitrate::bps(goal));
             t.dirty = true;
             self.touched.push((i, side));
         }

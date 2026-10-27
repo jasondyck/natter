@@ -47,10 +47,6 @@ const PLI_INTERVAL: Duration = Duration::from_millis(500);
 /// it measures none) only answers a NACK sent that much after the first;
 /// str0m's five, ~33 ms apart, miss that.
 const NACK_RETRIES: u8 = 10;
-/// Longest an incomplete video frame waits for its missing packets: the
-/// NACK retries above, plus a margin. str0m's default, 2 s, would hold every
-/// later frame that long; a browser asks for a keyframe sooner.
-const VIDEO_HOLD: Duration = Duration::from_millis(500);
 
 pub type ConnId = u64;
 
@@ -281,8 +277,7 @@ pub fn client_rtc(local: SocketAddr) -> Rtc {
         .set_send_buffer_audio(AUDIO_PACKET_BUFFER)
         .set_send_buffer_video(VIDEO_PACKET_BUFFER)
         .set_dtls_cert(cert.clone())
-        .set_nack_retries(NACK_RETRIES)
-        .set_reordering_timeout_video(Some(VIDEO_HOLD));
+        .set_nack_retries(NACK_RETRIES);
     *config.codec_config() = CodecConfig::new_from_payload_params(params);
     let mut rtc = config.build(Instant::now());
     rtc.add_local_candidate(Candidate::host(local, "udp").expect("a host candidate"));

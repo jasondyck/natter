@@ -13,9 +13,9 @@ use crate::packet::Vp8Patch;
 use crate::rtp_::MidRid;
 use crate::rtp_::Ssrc;
 use crate::rtp_::{Bitrate, Pt};
+use crate::rtp_::{DlrrItem, Rtcp, RtcpFb, RtpHeader};
 use crate::rtp_::{MediaTime, SenderInfo};
 use crate::rtp_::{Mid, Rid, SeqNo};
-use crate::rtp_::{Rtcp, RtpHeader};
 use crate::util::already_happened;
 
 pub use self::receive::StreamRx;
@@ -148,10 +148,6 @@ pub(crate) struct Streams {
     /// list that we don't want to allocate on every handle_timeout.
     mids_to_report: Vec<Mid>,
 
-    /// Whether nack reports are enabled. This is an optimization to avoid too frequent
-    /// Session::nack_at() when we don't need to send nacks.
-    any_nack_active: Option<bool>,
-
     /// Whether periodic statistics reports are expected to be generated. This informs us on
     /// whether we should be holding onto data needed for those reports or not.
     enable_stats: bool,
@@ -193,7 +189,6 @@ impl Streams {
             probe_media: None,
             default_ssrc_tx: 0.into(), // this will be changed
             mids_to_report: Vec::with_capacity(10),
-            any_nack_active: None,
             enable_stats,
             mtu_warn,
             pause_threshold,
@@ -220,7 +215,7 @@ impl Streams {
             return;
         }
 
-        let maybe_stream = self.stream_rx_by_midrid(midrid, false);
+        let maybe_stream = self.stream_rx_by_midrid(midrid);
 
         let (ssrc_main, rtx) = if is_main {
             let maybe_rtx = maybe_stream.and_then(|s| s.rtx());
@@ -252,7 +247,7 @@ impl Streams {
             return;
         }
 
-        let maybe_stream = self.stream_rx_by_midrid(midrid, false);
+        let maybe_stream = self.stream_rx_by_midrid(midrid);
 
         let (ssrc_main, rtx) = if is_main {
             let maybe_rtx = maybe_stream.and_then(|s| s.rtx());
@@ -279,7 +274,7 @@ impl Streams {
         media: &mut Media,
         payload: PayloadParams,
     ) {
-        let maybe_stream = self.stream_rx_by_midrid(midrid, false);
+        let maybe_stream = self.stream_rx_by_midrid(midrid);
 
         if let Some(stream) = maybe_stream {
             let ssrc_from = stream.ssrc();
@@ -320,17 +315,11 @@ impl Streams {
         midrid: MidRid,
         suppress_nack: bool,
     ) -> &mut StreamRx {
-        // New stream might have enabled nacks.
-        self.any_nack_active = None;
-
-        let stream = self
-            .streams_rx
-            .entry(ssrc)
-            .or_insert_with(|| {
-                let mut s = StreamRx::new(ssrc, midrid, suppress_nack, self.pause_threshold);
-                s.max_nacks = self.max_nacks;
-                s
-            });
+        let stream = self.streams_rx.entry(ssrc).or_insert_with(|| {
+            let mut s = StreamRx::new(ssrc, midrid, suppress_nack, self.pause_threshold);
+            s.max_nacks = self.max_nacks;
+            s
+        });
 
         if let Some(rtx) = rtx {
             stream.maybe_reset_rtx(rtx);
@@ -431,6 +420,19 @@ impl Streams {
         self.streams_rx.values().find_map(|s| s.paused_at())
     }
 
+    /// natter: the send streams' part of `handle_timeout`: timestamps what
+    /// was written since. False, touching nothing, if a stream has never
+    /// had a timeout (its first sets it up).
+    pub(crate) fn stamp_send_queues(&mut self, now: Instant) -> bool {
+        if self.streams_tx.values().any(|s| !s.has_had_timeout()) {
+            return false;
+        }
+        for stream in self.streams_tx.values_mut() {
+            stream.stamp_send_queue(now);
+        }
+        true
+    }
+
     pub(crate) fn send_stream(&self) -> Option<Instant> {
         if self.streams_tx.values().any(|s| s.need_timeout()) {
             Some(already_happened())
@@ -439,8 +441,12 @@ impl Streams {
         }
     }
 
-    pub(crate) fn is_receiving(&self) -> bool {
-        !self.streams_rx.is_empty()
+    pub(crate) fn pending_request(&self) -> Option<Instant> {
+        if self.streams_rx.values().any(|s| s.has_pending_request()) {
+            Some(already_happened())
+        } else {
+            None
+        }
     }
 
     pub(crate) fn handle_timeout(
@@ -471,7 +477,7 @@ impl Streams {
             }
 
             if do_nack {
-                stream.maybe_create_nack(sender_ssrc, feedback);
+                stream.maybe_create_nack(now, sender_ssrc, feedback);
             }
 
             stream.handle_timeout(now);
@@ -547,6 +553,20 @@ impl Streams {
 
     pub(crate) fn has_stream_tx(&self, ssrc: Ssrc) -> bool {
         self.streams_tx.contains_key(&ssrc)
+    }
+
+    pub(crate) fn handle_dlrr(&mut self, now: Instant, dlrr: DlrrItem) {
+        let is_default_ssrc = !self.default_ssrc_tx.is_probe() && dlrr.ssrc == self.default_ssrc_tx;
+        if !is_default_ssrc && !self.has_stream_tx(dlrr.ssrc) {
+            trace!("Ignoring DLRR for unknown local SSRC: {}", dlrr.ssrc);
+            return;
+        }
+
+        // DLRR identifies our RRTR sender, not a remote media SSRC. The measured
+        // round trip is shared by receive streams on this peer's transport.
+        for stream in self.streams_rx.values_mut() {
+            stream.handle_rtcp(now, RtcpFb::DlrrItem(dlrr));
+        }
     }
 
     pub(crate) fn streams_rx(&mut self) -> impl Iterator<Item = &mut StreamRx> {
@@ -678,17 +698,7 @@ impl Streams {
         self.streams_tx.values_mut().find(|s| s.is_midrid(midrid))
     }
 
-    pub(crate) fn stream_rx_by_midrid(
-        &mut self,
-        midrid: MidRid,
-        reset_cached_nack_flag: bool,
-    ) -> Option<&mut StreamRx> {
-        if reset_cached_nack_flag {
-            // Invalidate nack_active since it's possible to manipulate the
-            // nack setting on the returned StreamRx.
-            self.any_nack_active = None;
-        }
-
+    pub(crate) fn stream_rx_by_midrid(&mut self, midrid: MidRid) -> Option<&mut StreamRx> {
         self.streams_rx.values_mut().find(|s| s.is_midrid(midrid))
     }
 
@@ -750,9 +760,6 @@ impl Streams {
     }
 
     fn change_stream_rx_rtx(&mut self, rtx_from: Ssrc, rtx_to: Ssrc) {
-        // Invalidate since we might need to enable nacks now.
-        self.any_nack_active = None;
-
         // Remove the SSRC mapping
         self.rx_lookup.remove(&rtx_from);
 
@@ -774,29 +781,11 @@ impl Streams {
             .find(|s| s.ssrc() == ssrc || s.rtx() == Some(ssrc))
     }
 
-    /// natter: whether a receive stream has a request for the next timeout.
-    pub(crate) fn rx_requests_pending(&self) -> bool {
-        self.streams_rx.values().any(|s| s.has_pending_request())
-    }
-
-    /// natter: the send streams' part of `handle_timeout`: timestamps what
-    /// was written since. False, touching nothing, if a stream has never
-    /// had a timeout (its first sets it up).
-    pub(crate) fn stamp_send_queues(&mut self, now: Instant) -> bool {
-        if self.streams_tx.values().any(|s| !s.has_had_timeout()) {
-            return false;
-        }
-        for stream in self.streams_tx.values_mut() {
-            stream.stamp_send_queue(now);
-        }
-        true
-    }
-
-    pub(crate) fn any_nack_enabled(&mut self) -> bool {
-        if self.any_nack_active.is_none() {
-            self.any_nack_active = Some(self.streams_rx.values().any(|s| s.nack_enabled()));
-        }
-        self.any_nack_active.unwrap()
+    /// Whether any receive stream currently needs NACK reports (see [`StreamRx::nack_enabled`]).
+    ///
+    /// Not cached: the answer changes with pause state and pending NACK retries.
+    pub(crate) fn any_nack_enabled(&self) -> bool {
+        self.streams_rx.values().any(|s| s.nack_enabled())
     }
 
     fn rx_lookup_at(&self) -> Instant {

@@ -11,7 +11,7 @@
 
 [package]
 edition = "2024"
-rust-version = "1.85.0"
+rust-version = "1.89.0"
 name = "str0m-rust-crypto"
 version = "0.6.0"
 authors = ["Martin Algesten <martin@algesten.se>"]
@@ -31,57 +31,49 @@ name = "str0m_rust_crypto"
 path = "src/lib.rs"
 
 [dependencies.aes]
-version = "0.8"
-
-[dependencies.aes-gcm]
-version = "0.10"
-
-[dependencies.ctr]
 version = "0.9"
 
-# natter: no "rcgen" (it builds on aws-lc); certificates come from cert.rs.
-[dependencies.dimpl]
-version = "0.7.1"
-features = ["rust-crypto"]
-default-features = false
+[dependencies.aes-gcm]
+version = "0.11"
+
+[dependencies.ctr]
+version = "0.10"
 
 [dependencies.der]
 version = "0.7"
-features = ["alloc", "oid"]
+features = [
+    "alloc",
+    "oid",
+]
+
+[dependencies.dimpl]
+version = "0.9.0"
+features = ["rust-crypto"]
+default-features = false
 
 [dependencies.getrandom]
 version = "0.4"
 
-[dependencies.p256_cert]
-package = "p256"
-version = "0.14"
-default-features = false
-features = ["ecdsa", "pkcs8", "precomputed-tables", "std"]
+[dependencies.hmac]
+version = "0.13"
 
-[dependencies.sha2_cert]
-package = "sha2"
+[dependencies.p256]
+version = "0.14"
+features = [
+    "ecdh",
+    "ecdsa",
+    "pkcs8",
+]
+
+[dependencies.sha1]
+version = "0.11"
+
+[dependencies.sha2]
 version = "0.11"
 
 [dependencies.spki]
 version = "0.7"
 features = ["alloc"]
-
-[dependencies.x509-cert]
-version = "0.2"
-default-features = false
-
-[dependencies.hmac]
-version = "0.12.1"
-
-[dependencies.p256]
-version = "0.13"
-features = ["ecdh"]
-
-[dependencies.sha1]
-version = "0.10"
-
-[dependencies.sha2]
-version = "0.10"
 
 [dependencies.str0m-proto]
 version = "0.7.0"
@@ -89,4 +81,8 @@ features = ["dtls"]
 default-features = false
 
 [dependencies.time]
-version = "0.3"
+version = "0.3.47"
+
+[dependencies.x509-cert]
+version = "0.2"
+default-features = false

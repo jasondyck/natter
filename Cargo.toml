@@ -24,11 +24,14 @@ opt-level = "z"
 codegen-units = 1
 lto = true
 
-# str0m 0.24.1 with audio NACK: resends on the original stream, as browsers
-# do, instead of only over RTX. See vendor/README.md.
+# str0m from upstream main (unreleased, after 0.24.1) with natter's patches,
+# e.g. audio NACK that resends on the original stream, as browsers do. See
+# vendor/README.md.
 [patch.crates-io]
 str0m = { path = "vendor/str0m" }
 # str0m's ICE agent, 0.11.1: a nomination skips the check queue at once.
 is = { path = "vendor/is" }
 # str0m's RustCrypto backend, 0.6.0: DTLS certificates without aws-lc.
 str0m-rust-crypto = { path = "vendor/str0m-rust-crypto" }
+# str0m's shared types: main changed them without a version bump.
+str0m-proto = { path = "vendor/str0m-proto" }

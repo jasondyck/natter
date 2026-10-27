@@ -46,7 +46,7 @@ crates/
   server/    axum (/rtc, /api, static files) and the media engine thread
   client/    Leptos CSR app, built with trunk
   load/      natter-load, the load generator for benchmarks
-vendor/str0m  str0m 0.24.1 with natter's patches (vendor/README.md)
+vendor/str0m  str0m from upstream main with natter's patches (vendor/README.md)
 docs/livekit  the LiveKit parity plan (PARITY.md) and reference material
 docs/benchmarks  results against LiveKit and other SFUs, raw data
 docs/feature-parity.md  supported and planned features vs other servers

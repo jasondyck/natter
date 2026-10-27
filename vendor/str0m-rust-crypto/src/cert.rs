@@ -9,10 +9,10 @@ use std::time::{Duration, SystemTime};
 
 use der::asn1::{BitString, ObjectIdentifier, UtcTime};
 use der::{Any, Encode};
-use p256_cert::ecdsa::signature::hazmat::PrehashSigner;
-use p256_cert::ecdsa::{Signature, SigningKey};
-use p256_cert::pkcs8::EncodePrivateKey;
-use sha2_cert::Digest;
+use p256::ecdsa::signature::hazmat::PrehashSigner;
+use p256::ecdsa::{Signature, SigningKey};
+use p256::pkcs8::EncodePrivateKey;
+use sha2::Digest;
 use spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 use x509_cert::certificate::{Certificate, TbsCertificate, Version};
 use x509_cert::name::Name;
@@ -80,7 +80,7 @@ pub(crate) fn generate() -> Option<Generated> {
         subject_unique_id: None,
         extensions: None,
     };
-    let digest = sha2_cert::Sha256::digest(tbs.to_der().ok()?);
+    let digest = sha2::Sha256::digest(tbs.to_der().ok()?);
     let signature: Signature = key.sign_prehash(&digest).ok()?;
     let certificate = Certificate {
         tbs_certificate: tbs,
@@ -97,9 +97,9 @@ pub(crate) fn generate() -> Option<Generated> {
 mod tests {
     use super::*;
     use der::Decode;
-    use p256_cert::ecdsa::VerifyingKey;
-    use p256_cert::ecdsa::signature::hazmat::PrehashVerifier;
-    use p256_cert::pkcs8::DecodePrivateKey;
+    use p256::ecdsa::VerifyingKey;
+    use p256::ecdsa::signature::hazmat::PrehashVerifier;
+    use p256::pkcs8::DecodePrivateKey;
 
     #[test]
     fn self_signed_and_matching_its_key() {
@@ -111,8 +111,10 @@ mod tests {
         let spki = &tbs.subject_public_key_info;
         let public = VerifyingKey::from_sec1_bytes(spki.subject_public_key.raw_bytes()).unwrap();
         let signature = Signature::from_der(cert.signature.raw_bytes()).unwrap();
-        let digest = sha2_cert::Sha256::digest(tbs.to_der().unwrap());
-        public.verify_prehash(&digest, &signature).expect("self-signed");
+        let digest = sha2::Sha256::digest(tbs.to_der().unwrap());
+        public
+            .verify_prehash(&digest, &signature)
+            .expect("self-signed");
         let key = SigningKey::from_pkcs8_der(&g.private_key).expect("PKCS#8");
         assert_eq!(key.verifying_key(), &public);
         assert_ne!(generate().unwrap().certificate, g.certificate);
@@ -128,7 +130,12 @@ mod tests {
             certificate: g.certificate,
             private_key: g.private_key,
         };
-        let config = Arc::new(dimpl::Config::builder().use_server_cookie(false).build().unwrap());
+        let config = Arc::new(
+            dimpl::Config::builder()
+                .use_server_cookie(false)
+                .build()
+                .unwrap(),
+        );
         let now = Instant::now();
         let mut client = dimpl::Dtls::new_12(config.clone(), cert(generate().unwrap()), now);
         let mut server = dimpl::Dtls::new_12(config, cert(generate().unwrap()), now);

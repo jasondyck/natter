@@ -12,7 +12,7 @@ anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 # Pure-Rust DTLS, as the server (see rtc_config::install_crypto there).
-dimpl = { version = "0.7", default-features = false, features = ["rust-crypto"] }
+dimpl = { version = "0.9", default-features = false, features = ["rust-crypto"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 hdrhistogram = { version = "7", default-features = false }
 hmac = "0.13"
