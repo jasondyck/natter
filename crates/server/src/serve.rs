@@ -164,6 +164,7 @@ pub async fn serve(mut config: Settings) -> Result<()> {
     let turn = start_turn(&config, &handles)?;
 
     purge_hourly(Arc::clone(&auth));
+    trim_when_idle(Arc::clone(&metrics));
 
     let state = AppState {
         rtc: livekit::signal::RtcState {
@@ -354,6 +355,39 @@ fn purge_hourly(auth: Arc<Auth>) {
             }
         }
     });
+}
+
+/// Hands freed heap back to the kernel once the last peer has gone. glibc
+/// keeps what calls churned through in its per-thread arenas, so without
+/// this the resident size of an idle server sits at its high-water mark
+/// (≈115 MiB after a soak, with under 2 MiB of it live).
+fn trim_when_idle(metrics: Arc<Metrics>) {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        let mut busy = false;
+        loop {
+            tick.tick().await;
+            if metrics.peers.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                busy = true;
+                continue;
+            }
+            if !std::mem::take(&mut busy) {
+                continue;
+            }
+            let trim = tokio::task::spawn_blocking(|| {
+                let (before, start) = (util::resident_kib(), std::time::Instant::now());
+                // SAFETY: no arguments to get wrong; glibc locks each arena.
+                unsafe { libc::malloc_trim(0) };
+                (before, util::resident_kib(), start.elapsed())
+            });
+            if let Ok((before, after, took)) = trim.await {
+                info!(before_kib = before, after_kib = after, ?took, "idle: trimmed heap");
+            }
+        }
+    });
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    let _ = metrics;
 }
 
 /// Ctrl-C, or SIGTERM from systemd or Kubernetes. As a container's PID 1

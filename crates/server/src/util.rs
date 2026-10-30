@@ -59,6 +59,18 @@ pub fn allowed_cpus() -> Vec<usize> {
     vec![]
 }
 
+/// This process's resident set size in KiB (VmRSS), or 0 where unknown.
+pub fn resident_kib() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("VmRSS:"))
+                .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+        })
+        .unwrap_or(0)
+}
+
 /// Keeps the calling thread on one CPU.
 pub fn pin_to_cpu(cpu: usize) {
     #[cfg(target_os = "linux")]
