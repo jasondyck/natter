@@ -217,6 +217,12 @@ pub async fn serve(mut config: Settings) -> Result<()> {
     let mut servers = tokio::task::JoinSet::new();
     for listener in listeners {
         let (app, mut stop) = (app.clone(), stop_tx.subscribe());
+        // Signalling is small messages each way: without TCP_NODELAY, Nagle
+        // holds one back until the last is acknowledged, up to a round trip
+        // more (Go, and so LiveKit, sets it on every TCP connection).
+        let listener = axum::serve::ListenerExt::tap_io(listener, |tcp| {
+            let _ = tcp.set_nodelay(true);
+        });
         servers.spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move {
