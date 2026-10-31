@@ -1262,6 +1262,7 @@ pub fn run(
             next_housekeeping = now + Duration::from_millis(100);
             engine.reap_soon = false;
             engine.reap(now);
+            engine.track_layers(now);
             engine.seed_keyframes(now);
             engine.check_unstable(now);
             engine.dynacast(now);
