@@ -116,6 +116,7 @@ pub async fn serve(mut config: Settings) -> Result<()> {
         let opts = livekit::engine::Options {
             max_participants: config.max_peers,
             remote_unmute: config.remote_unmute,
+            fallback: config.fallback,
             room_defaults: config.rooms,
             region: config.region.clone(),
             node_id: node_id.clone(),
@@ -217,6 +218,12 @@ pub async fn serve(mut config: Settings) -> Result<()> {
     let mut servers = tokio::task::JoinSet::new();
     for listener in listeners {
         let (app, mut stop) = (app.clone(), stop_tx.subscribe());
+        // Signalling is small messages each way: without TCP_NODELAY, Nagle
+        // holds one back until the last is acknowledged, up to a round trip
+        // more (Go, and so LiveKit, sets it on every TCP connection).
+        let listener = axum::serve::ListenerExt::tap_io(listener, |tcp| {
+            let _ = tcp.set_nodelay(true);
+        });
         servers.spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move {

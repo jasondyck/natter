@@ -149,6 +149,14 @@ congestion (loss, queueing) from a dip in GCC's estimate (`streams/send.rs`,
 come every 3 s instead of 5, as LiveKit's probe regulator
 (`bwe/probe/control.rs`, `MIN_TIME_BETWEEN_ALR_PROBES`).
 
+### Patch: `StreamTx::reception`
+
+`StreamTx::reception` gives how many receiver reports came for the stream
+and the latest one's fraction lost (`streams/send.rs`,
+`streams/send_stats.rs`), for natter's UDP-unstable fallback
+(`livekit::fallback::Unstable`), which counts reports as LiveKit's media
+loss proxy does.
+
 ### Patch: `Event::TwccFeedback`
 
 With `RtcConfig::enable_twcc_feedback_events`, every TWCC feedback report on

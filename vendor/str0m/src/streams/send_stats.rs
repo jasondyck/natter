@@ -37,6 +37,8 @@ pub(crate) struct StreamTxStats {
     /// The SeqNo is the extended max_seq of the reception report, extended
     /// using the last sent sequence number.
     last_rr: Option<(SeqNo, ReceptionReport)>,
+    /// Reception reports received (natter patch).
+    reports: u64,
 
     /// `None` if `rtx_ratio_cap` is `None`.
     pub bytes_transmitted: Option<ValueHistory<u64>>,
@@ -58,9 +60,16 @@ impl StreamTxStats {
             rtt: None,
             losses: Losses::new(enable_stats),
             last_rr: None,
+            reports: 0,
             bytes_transmitted: Some(Default::default()),
             bytes_retransmitted: Some(Default::default()),
         }
+    }
+
+    /// How many reception reports came, and the latest one's fraction lost
+    /// (natter patch).
+    pub fn reception(&self) -> Option<(u64, u8)> {
+        self.last_rr.as_ref().map(|(_, r)| (self.reports, r.fraction_lost))
     }
 
     /// The round trip time from the latest receiver report (natter patch).
@@ -103,6 +112,7 @@ impl StreamTxStats {
         let ext_seq = extend_u32(Some(*last_sent_seq_no), r.max_seq).into();
 
         self.last_rr = Some((ext_seq, r));
+        self.reports += 1;
 
         self.losses
             .push((*ext_seq, r.fraction_lost as f32 / u8::MAX as f32));

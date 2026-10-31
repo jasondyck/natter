@@ -559,6 +559,8 @@ struct Participant {
     restart_ice: bool,
     /// Which candidates the client is held to, after failures.
     fallback: Fallback,
+    /// Whether what it receives over UDP keeps losing (`fallback::Unstable`).
+    unstable: fallback::Unstable,
     ice_tcp: bool,
     /// The TURN servers it was given (all of them, for when the fallback
     /// narrows them to TLS).
@@ -1085,6 +1087,7 @@ pub struct Options {
     pub max_participants: usize,
     /// Admins may unmute (LiveKit `room.enable_remote_unmute`).
     pub remote_unmute: bool,
+    pub fallback: fallback::Config,
     pub room_defaults: RoomDefaults,
     /// This node's region (LiveKit `region`).
     pub region: String,
@@ -1161,6 +1164,7 @@ pub struct Engine {
     reap_soon: bool,
     /// Admins may unmute (LiveKit `room.enable_remote_unmute`).
     remote_unmute: bool,
+    fallback: fallback::Config,
     room_defaults: RoomDefaults,
     region: String,
     /// Server-initiated RPCs (RoomService PerformRpc) awaiting replies.
@@ -1220,6 +1224,7 @@ pub fn run(
         membership_changed: false,
         reap_soon: false,
         remote_unmute: opts.remote_unmute,
+        fallback: opts.fallback,
         room_defaults: opts.room_defaults,
         region: opts.region,
         rpcs: HashMap::new(),
@@ -1258,6 +1263,7 @@ pub fn run(
             engine.reap_soon = false;
             engine.reap(now);
             engine.seed_keyframes(now);
+            engine.check_unstable(now);
             engine.dynacast(now);
             engine.check_recording();
             engine.allocate_due(now);

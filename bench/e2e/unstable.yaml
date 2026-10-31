@@ -1,0 +1,4 @@
+rtc:
+  tcp_port: 7881
+  allow_udp_unstable_fallback: true
+  tcp_fallback_rtt_threshold: 1000
