@@ -174,8 +174,7 @@ impl Engine {
                 p.cc.detector.on_feedback(&packets, now);
                 p.cc.twcc_seen = true;
                 // Act on congestion as soon as it shows.
-                let e = p.cc.detector.evidence(now);
-                if e.queueing || e.loss {
+                if p.cc.detector.congested(now) {
                     self.allocate(i, now);
                 }
             }
