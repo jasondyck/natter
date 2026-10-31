@@ -443,6 +443,12 @@ impl StreamTx {
         self.stats.rtt()
     }
 
+    /// How many receiver reports came for this stream, and the latest
+    /// one's fraction lost (of 256; natter patch).
+    pub fn reception(&self) -> Option<(u64, u8)> {
+        self.stats.reception()
+    }
+
     /// The resend (RTX) SSRC of this encoded stream.
     pub fn rtx(&self) -> Option<Ssrc> {
         self.rtx

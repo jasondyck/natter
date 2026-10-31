@@ -83,9 +83,9 @@ const SCHEMA: &[(&str, Use)] = {
         ("rtc.congestion_control.use_send_side_bwe_interceptor", I),
         ("rtc.congestion_control.send_side_bwe_pacer", I),
         ("rtc.congestion_control.send_side_bwe", I),
-        ("rtc.allow_tcp_fallback", I),
-        ("rtc.tcp_fallback_rtt_threshold", I),
-        ("rtc.allow_udp_unstable_fallback", I),
+        ("rtc.allow_tcp_fallback", U),
+        ("rtc.tcp_fallback_rtt_threshold", U),
+        ("rtc.allow_udp_unstable_fallback", U),
         ("rtc.reconnect_on_publication_error", I),
         ("rtc.reconnect_on_subscription_error", I),
         ("rtc.reconnect_on_data_channel_error", I),
@@ -294,6 +294,9 @@ struct LkRtc {
     use_external_ip: bool,
     turn_servers: Vec<LkTurnServer>,
     congestion_control: LkCongestion,
+    allow_tcp_fallback: Option<bool>,
+    tcp_fallback_rtt_threshold: Option<u64>,
+    allow_udp_unstable_fallback: Option<bool>,
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -617,6 +620,10 @@ pub struct Settings {
     pub pin_engines: bool,
     pub dtls_crypto: livekit::rtc_config::DtlsCrypto,
     pub media: livekit::rtc_config::MediaConfig,
+    /// Moving clients off UDP when it fails or keeps losing (LiveKit's
+    /// `rtc.allow_tcp_fallback`, `rtc.tcp_fallback_rtt_threshold`,
+    /// `rtc.allow_udp_unstable_fallback`).
+    pub fallback: livekit::fallback::Config,
     /// API keys for LiveKit access tokens (`key: secret`).
     pub keys: livekit::token::Keys,
     pub region: String,
@@ -1270,6 +1277,15 @@ impl Settings {
                 congestion,
                 allow_pause: env_parse("NATTER_ALLOW_PAUSE")?
                     .unwrap_or(cc.allow_pause.unwrap_or(false)),
+            },
+            fallback: livekit::fallback::Config {
+                enabled: lk.rtc.allow_tcp_fallback.unwrap_or(true),
+                rtt_threshold: lk
+                    .rtc
+                    .tcp_fallback_rtt_threshold
+                    .filter(|&ms| ms > 0)
+                    .map(Duration::from_millis),
+                udp_unstable: lk.rtc.allow_udp_unstable_fallback.unwrap_or(false),
             },
             keys,
             region: lk.region.clone().unwrap_or_default(),

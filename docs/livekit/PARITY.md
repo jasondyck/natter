@@ -149,7 +149,6 @@ offered follows how people judge video on calls (`allocator::Track::shape`):
      (audio publications with more than one codec, which natter doesn't
      take yet). Of LiveKit's SDKs only the Go one (`server-sdk-go`) acts on
      it, publishing the backup codec asked for; the JS SDK ignores it.
-   - UDP-unstable fallback.
    - WHEP.
    - Multi-node: Redis TLS/Sentinel/Cluster, draining that waits for
      rooms, several replicas on Kubernetes (UDP ports per pod).
@@ -469,7 +468,30 @@ track and LOW for the other, no loss.
       LiveKit, a move holds through the resume that reports it (LiveKit
       answers and restarts ICE with the stale preference, and falls back
       to any transport when a UDP failure is reported after the move).
-      Not done: the UDP-unstable fallback (off by default in LiveKit)
+      `rtc.allow_tcp_fallback` (off: no moves) and
+      `rtc.tcp_fallback_rtt_threshold` (ICE/TCP only under it, TURN/TLS
+      over it) are read.
+- [x] UDP-unstable fallback (`rtc.allow_udp_unstable_fallback`, off by
+      default, needs the threshold; `fallback::Unstable`): the
+      subscriber's receiver reports as LiveKit's media loss proxy (the
+      highest fraction lost at most once a second, polled from str0m by
+      the engine's housekeeping), 20 of the last 32 at 25% or more, while
+      signalling round-trips in under 1.3× the media round trip and under
+      the threshold, move it on as a short-lived failure and ask it to
+      resume; only while on UDP. Signalling RTT is the client's ping RTT
+      (LiveKit's is the time from join to the first subscriber answer,
+      which a single-PC client never sends). `bench/e2e/unstable.sh` (35%
+      of the server's UDP dropped, 40 ms each way): natter and LiveKit both
+      move the subscriber to ICE/TCP after about 20 s, 0% loss after.
+      Found with it: signalling had no `TCP_NODELAY`, so Nagle doubled its
+      round trip (161–202 ms on an 80 ms path); now set
+- [ ] An ICE restart onto TCP sometimes fails at first: Chrome's checks
+      on the new TCP connection name our previous ufrag with its new one
+      (`old:new`, rejected), though our answer carried the new one. The
+      answer before the move listed the same TCP candidate address with
+      the old ufrag. natter's ICE/TCP connect timer (5 s) asks it to resume
+      again and that one connects. In 3 of 4 `unstable.sh` runs; not in
+      the one LiveKit run
 - [x] Native WHIP `/whip/v1` (POST/GET/OPTIONS, PATCH trickle and ICE
       restart, DELETE; one-shot participants: tracks synthesized from the
       offer, closed on transport failure, layer sizes from keyframes).

@@ -116,6 +116,7 @@ pub async fn serve(mut config: Settings) -> Result<()> {
         let opts = livekit::engine::Options {
             max_participants: config.max_peers,
             remote_unmute: config.remote_unmute,
+            fallback: config.fallback,
             room_defaults: config.rooms,
             region: config.region.clone(),
             node_id: node_id.clone(),

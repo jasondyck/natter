@@ -17,7 +17,7 @@ use super::{
     Resume, Room, Side, Transport, admin, data_track, enabled_codecs, leave, new_downtrack, refuse,
     response, sdk_name, server_info, stop_downtrack,
 };
-use crate::livekit::fallback::{self, Fallback, Pref};
+use crate::livekit::fallback::{self, Fallback, Path, Pref};
 use crate::livekit::ids;
 use crate::livekit::webhook;
 
@@ -79,12 +79,66 @@ impl Engine {
             .iter()
             .flat_map(|s| &s.urls)
             .any(|u| u.starts_with("turns:"));
-        if let Some(pref) = p.fallback.on_failure(path, short, p.ice_tcp, tls, now) {
+        if !self.fallback.enabled {
+            return;
+        }
+        let tcp = p.ice_tcp && self.fallback.tcp_by_rtt(p.signal_rtt);
+        if let Some(pref) = p.fallback.on_failure(path, short, tcp, tls, now) {
             info!(identity = %p.identity, ?path, short, ?pref, "transport fallback");
             let key = (p.room.to_string(), p.identity.clone());
             self.ice_prefs
                 .retain(|_, (_, at)| now.duration_since(*at) < fallback::REMEMBER);
             self.ice_prefs.insert(key, (pref, now));
+        }
+    }
+
+    /// LiveKit's UDP-unstable fallback (`fallback::Unstable`): a client
+    /// whose receiver reports keep showing heavy loss is moved on as if its
+    /// connection had failed young, and asked to resume.
+    pub(super) fn check_unstable(&mut self, now: Instant) {
+        if !self.fallback.checks_unstable() {
+            return;
+        }
+        let mut unstable = vec![];
+        for (i, p) in self.participants.iter_mut().enumerate() {
+            if p.one_shot || p.closing || p.cleanup_at.is_some() || p.backlogged {
+                continue;
+            }
+            // Only a client on UDP has somewhere to go.
+            if sub!(p).path() != Some(Path::Udp) {
+                continue;
+            }
+            let mids: Vec<str0m::media::Mid> =
+                p.downtracks.iter().filter_map(|d| d.state.mid()).collect();
+            let t = sub!(p);
+            let mut api = t.rtc.direct_api();
+            let mut rtt = None::<Duration>;
+            for mid in mids {
+                let Some(s) = api.stream_tx_by_mid(mid, None) else {
+                    continue;
+                };
+                if let Some((reports, lost)) = s.reception() {
+                    p.unstable.reception(mid, reports, lost);
+                }
+                if let Some(r) = s.rtt() {
+                    rtt = Some(rtt.map_or(r, |m| m.min(r)));
+                }
+            }
+            if let Some(r) = rtt {
+                p.unstable.media_rtt(r);
+            }
+            if p.unstable.check(&self.fallback, p.signal_rtt, now) {
+                info!(identity = %p.identity, signal_rtt = ?p.signal_rtt, "UDP connection unstable; moving it on");
+                unstable.push(i);
+            }
+        }
+        for i in unstable {
+            let side = if self.participants[i].subscriber.is_some() {
+                Side::Subscriber
+            } else {
+                Side::Publisher
+            };
+            self.media_lost(i, side, true);
         }
     }
 
@@ -167,6 +221,7 @@ impl Engine {
         }));
         // The client restarts ICE with this preference: count afresh.
         p.fallback.resumed();
+        p.unstable.reset();
         p.publisher.connected_at = None;
         if let Some(s) = &mut p.subscriber {
             s.connected_at = None;
@@ -343,6 +398,7 @@ impl Engine {
             cleanup_at: None,
             restart_ice: false,
             fallback: Fallback::new(pref),
+            unstable: Default::default(),
             ice_tcp: join.ice_tcp,
             ice_servers: join.ice_servers,
             signal_rtt: None,
