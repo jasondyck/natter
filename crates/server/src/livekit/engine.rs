@@ -474,6 +474,8 @@ struct DownTrack {
     svc: video::SvcDown,
     /// Video VP8: its temporal layer and picture numbering.
     vp8: video::Vp8Down,
+    /// Video: the frame numbers of the dependency descriptors it is sent.
+    dd_out: video::DdOut,
     /// Video: the subscriber has no payload type for the track's primary
     /// codec, so it takes the backup codec's stream; and which stream it
     /// was last forwarded from.
@@ -579,6 +581,9 @@ struct Participant {
     /// the stream, and its SSRC; a fresh random start below the last would
     /// be dropped as replayed or old).
     mid_sent: Vec<(Mid, u64, u32)>,
+    /// The highest dependency descriptor frame number sent on each m-line,
+    /// for the same reason (`video::DdOut`).
+    mid_frames: Vec<(Mid, u64)>,
     /// The last reliable data packet's sequence number from this client:
     /// after a resume it resends what came later (`last_message_seq`), and
     /// anything not newer is a duplicate.
@@ -1751,6 +1756,7 @@ fn new_downtrack(
         stream_state: StreamState::Inactive,
         svc: video::SvcDown::default(),
         vp8: video::Vp8Down::default(),
+        dd_out: video::DdOut::default(),
         cannot_primary: false,
         on_backup: false,
         last_out: None,
