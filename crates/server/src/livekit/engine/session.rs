@@ -226,7 +226,12 @@ impl Engine {
         if let Some(s) = &mut p.subscriber {
             s.connected_at = None;
         }
-        p.arm_tcp_check(Instant::now());
+        // No ICE/TCP connect timer for the restart (LiveKit arms it only on
+        // a connection's first ICE start). Moved off a lossy but working
+        // UDP path, Chrome prunes the new TCP pair while the old UDP one is
+        // still selected and pings it only once that goes unwritable, about
+        // 5 s on, with media still on UDP meanwhile; the timer used to fire
+        // just before and force a second resume.
         let room = p.room.clone();
         let everyone: Vec<lk::ParticipantInfo> = self.rooms[&room]
             .members

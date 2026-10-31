@@ -485,13 +485,13 @@ track and LOW for the other, no loss.
       move the subscriber to ICE/TCP after about 20 s, 0% loss after.
       Found with it: signalling had no `TCP_NODELAY`, so Nagle doubled its
       round trip (161–202 ms on an 80 ms path); now set
-- [ ] An ICE restart onto TCP sometimes fails at first: Chrome's checks
-      on the new TCP connection name our previous ufrag with its new one
-      (`old:new`, rejected), though our answer carried the new one. The
-      answer before the move listed the same TCP candidate address with
-      the old ufrag. natter's ICE/TCP connect timer (5 s) asks it to resume
-      again and that one connects. In 3 of 4 `unstable.sh` runs; not in
-      the one LiveKit run
+- [x] The ICE/TCP connect timer only on a connection's first ICE start,
+      as LiveKit, not again on a resume. Moved off a lossy but working UDP
+      path, Chrome prunes the new TCP pair (libwebrtc prunes a pair below
+      the selected one on the same network) and pings it only once the old
+      UDP pair goes unwritable, about 5 s on, media still on UDP meanwhile;
+      the timer fired just before and forced a second resume (3 of 4
+      `unstable.sh` runs)
 - [x] Native WHIP `/whip/v1` (POST/GET/OPTIONS, PATCH trickle and ICE
       restart, DELETE; one-shot participants: tracks synthesized from the
       offer, closed on transport failure, layer sizes from keyframes).
