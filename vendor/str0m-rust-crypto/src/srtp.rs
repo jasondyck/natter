@@ -1,7 +1,8 @@
 //! SRTP cipher implementations using RustCrypto.
 
 use aes::cipher::Array;
-use aes_gcm::aead::{Aead, KeyInit, Payload};
+use aes_gcm::aead::inout::InOutBuf;
+use aes_gcm::aead::{AeadInOut, KeyInit};
 use aes_gcm::{Aes128Gcm, Aes256Gcm, Nonce};
 use ctr::cipher::{KeyIvInit, StreamCipher};
 
@@ -62,6 +63,56 @@ impl Aes128CmSha1_80Cipher for RustCryptoAes128CmSha1_80Cipher {
 // AEAD-AES-128-GCM Cipher
 // ============================================================================
 
+// ============================================================================
+// AES-GCM, either key size (natter patch): straight from str0m's input to its
+// output buffer, as `AeadInOut` allows, rather than `Aead`'s new `Vec` per
+// packet copied over afterwards.
+// ============================================================================
+
+fn gcm_encrypt<C: AeadInOut>(
+    cipher: &C,
+    nonce: &aes_gcm::aead::Nonce<C>,
+    aad: &[u8],
+    input: &[u8],
+    output: &mut [u8],
+) -> Result<(), CryptoError> {
+    let (ciphertext, rest) = output.split_at_mut(input.len());
+    let buf = InOutBuf::new(input, ciphertext)
+        .map_err(|e| CryptoError::Other(format!("AES-GCM buffers: {e:?}")))?;
+    let tag = cipher
+        .encrypt_inout_detached(nonce, aad, buf)
+        .map_err(|e| CryptoError::Other(format!("AES-GCM encrypt failed: {:?}", e)))?;
+    rest[..tag.len()].copy_from_slice(&tag);
+    Ok(())
+}
+
+fn gcm_decrypt<C: AeadInOut>(
+    cipher: &C,
+    nonce: &aes_gcm::aead::Nonce<C>,
+    aads: &[&[u8]],
+    input: &[u8],
+    output: &mut [u8],
+    tag_len: usize,
+) -> Result<usize, CryptoError> {
+    let (ciphertext, tag) = input.split_at(input.len() - tag_len);
+    let tag = aes_gcm::aead::Tag::<C>::try_from(tag)
+        .map_err(|_| CryptoError::Other("AES-GCM tag length".into()))?;
+    // Concatenate AAD slices if needed
+    let aad_vec: Vec<u8>;
+    let aad = if aads.len() == 1 {
+        aads[0]
+    } else {
+        aad_vec = aads.concat();
+        &aad_vec
+    };
+    let buf = InOutBuf::new(ciphertext, &mut output[..ciphertext.len()])
+        .map_err(|e| CryptoError::Other(format!("AES-GCM buffers: {e:?}")))?;
+    cipher
+        .decrypt_inout_detached(nonce, aad, buf, &tag)
+        .map_err(|e| CryptoError::Other(format!("AES-GCM decrypt failed: {:?}", e)))?;
+    Ok(ciphertext.len())
+}
+
 struct RustCryptoAeadAes128GcmCipher {
     cipher: Aes128Gcm,
 }
@@ -84,17 +135,7 @@ impl AeadAes128GcmCipher for RustCryptoAeadAes128GcmCipher {
             aad.len() >= 12,
             "Associated data length MUST be at least 12 octets"
         );
-
-        let nonce = Nonce::from(*iv);
-        let payload = Payload { msg: input, aad };
-
-        let ciphertext = self
-            .cipher
-            .encrypt(&nonce, payload)
-            .map_err(|e| CryptoError::Other(format!("AES-GCM encrypt failed: {:?}", e)))?;
-
-        output[..ciphertext.len()].copy_from_slice(&ciphertext);
-        Ok(())
+        gcm_encrypt(&self.cipher, &Nonce::from(*iv), aad, input, output)
     }
 
     fn decrypt(
@@ -108,27 +149,14 @@ impl AeadAes128GcmCipher for RustCryptoAeadAes128GcmCipher {
         // the input holds at least the auth tag. A shorter buffer is a bug in str0m,
         // not bad input, so fail fast rather than hiding it in an error.
         assert!(input.len() >= AeadAes128Gcm::TAG_LEN);
-
-        let nonce = Nonce::from(*iv);
-
-        // Concatenate AAD slices if needed
-        let aad_vec: Vec<u8>;
-        let aad = if aads.len() == 1 {
-            aads[0]
-        } else {
-            aad_vec = aads.concat();
-            &aad_vec
-        };
-
-        let payload = Payload { msg: input, aad };
-
-        let plaintext = self
-            .cipher
-            .decrypt(&nonce, payload)
-            .map_err(|e| CryptoError::Other(format!("AES-GCM decrypt failed: {:?}", e)))?;
-
-        output[..plaintext.len()].copy_from_slice(&plaintext);
-        Ok(plaintext.len())
+        gcm_decrypt(
+            &self.cipher,
+            &Nonce::from(*iv),
+            aads,
+            input,
+            output,
+            AeadAes128Gcm::TAG_LEN,
+        )
     }
 }
 
@@ -158,17 +186,7 @@ impl AeadAes256GcmCipher for RustCryptoAeadAes256GcmCipher {
             aad.len() >= 12,
             "Associated data length MUST be at least 12 octets"
         );
-
-        let nonce = Nonce::from(*iv);
-        let payload = Payload { msg: input, aad };
-
-        let ciphertext = self
-            .cipher
-            .encrypt(&nonce, payload)
-            .map_err(|e| CryptoError::Other(format!("AES-GCM encrypt failed: {:?}", e)))?;
-
-        output[..ciphertext.len()].copy_from_slice(&ciphertext);
-        Ok(())
+        gcm_encrypt(&self.cipher, &Nonce::from(*iv), aad, input, output)
     }
 
     fn decrypt(
@@ -182,27 +200,14 @@ impl AeadAes256GcmCipher for RustCryptoAeadAes256GcmCipher {
         // the input holds at least the auth tag. A shorter buffer is a bug in str0m,
         // not bad input, so fail fast rather than hiding it in an error.
         assert!(input.len() >= AeadAes256Gcm::TAG_LEN);
-
-        let nonce = Nonce::from(*iv);
-
-        // Concatenate AAD slices if needed
-        let aad_vec: Vec<u8>;
-        let aad = if aads.len() == 1 {
-            aads[0]
-        } else {
-            aad_vec = aads.concat();
-            &aad_vec
-        };
-
-        let payload = Payload { msg: input, aad };
-
-        let plaintext = self
-            .cipher
-            .decrypt(&nonce, payload)
-            .map_err(|e| CryptoError::Other(format!("AES-GCM decrypt failed: {:?}", e)))?;
-
-        output[..plaintext.len()].copy_from_slice(&plaintext);
-        Ok(plaintext.len())
+        gcm_decrypt(
+            &self.cipher,
+            &Nonce::from(*iv),
+            aads,
+            input,
+            output,
+            AeadAes256Gcm::TAG_LEN,
+        )
     }
 }
 
@@ -324,5 +329,52 @@ impl SrtpProvider for RustCryptoSrtpProvider {
         let mut block2 = Array::from([0x10u8; 16]);
         cipher.encrypt_block(&mut block2);
         output[16..32].copy_from_slice(&block2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aes_gcm::aead::{Aead, Payload};
+
+    /// The in-place path (natter patch) gives exactly what `Aead` gives, and
+    /// decrypts it back; a changed byte fails.
+    #[test]
+    fn gcm_inout_matches_aead() {
+        let key = [7u8; 32];
+        let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
+        let mut c = RustCryptoAeadAes256GcmCipher {
+            cipher: Aes256Gcm::new_from_slice(&key).unwrap(),
+        };
+        for len in [0usize, 1, 15, 16, 17, 160, 1200] {
+            let input: Vec<u8> = (0..len).map(|i| (i * 31 + len) as u8).collect();
+            let iv = [len as u8; 12];
+            let aad = [0x80u8; 12];
+            let want = cipher
+                .encrypt(&Nonce::from(iv), Payload { msg: &input, aad: &aad })
+                .unwrap();
+            let mut out = vec![0u8; len + AeadAes256Gcm::TAG_LEN];
+            c.encrypt(&iv, &aad, &input, &mut out).unwrap();
+            assert_eq!(out, want, "len {len}");
+            // AAD in two slices, as SRTCP passes it.
+            let mut back = vec![0u8; len];
+            let n = c.decrypt(&iv, &[&aad[..4], &aad[4..]], &out, &mut back).unwrap();
+            assert_eq!((n, &back), (len, &input));
+            out[len / 2] ^= 1;
+            assert!(c.decrypt(&iv, &[&aad], &out, &mut back).is_err());
+        }
+        let key = [9u8; 16];
+        let cipher = Aes128Gcm::new_from_slice(&key).unwrap();
+        let mut c = RustCryptoAeadAes128GcmCipher {
+            cipher: Aes128Gcm::new_from_slice(&key).unwrap(),
+        };
+        let input = [5u8; 300];
+        let (iv, aad) = ([3u8; 12], [1u8; 12]);
+        let want = cipher
+            .encrypt(&Nonce::from(iv), Payload { msg: &input, aad: &aad })
+            .unwrap();
+        let mut out = vec![0u8; input.len() + AeadAes128Gcm::TAG_LEN];
+        c.encrypt(&iv, &aad, &input, &mut out).unwrap();
+        assert_eq!(out, want);
     }
 }

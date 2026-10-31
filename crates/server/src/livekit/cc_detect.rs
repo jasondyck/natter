@@ -61,6 +61,8 @@ pub struct Detector {
     /// Packets reported over the last `RATE_WINDOW`: when the report came,
     /// arrival (None: lost) and size.
     recent: VecDeque<(Instant, Option<Instant>, u16)>,
+    /// How many of `recent` were lost.
+    lost: usize,
 }
 
 /// One-way delay in nanoseconds, signed (arrival is on the remote's clock).
@@ -77,13 +79,16 @@ impl Detector {
     pub fn on_feedback(&mut self, packets: &[TwccPacket], now: Instant) {
         for p in packets {
             self.recent.push_back((now, p.arrived, p.size));
+            self.lost += usize::from(p.arrived.is_none());
         }
         while self
             .recent
             .front()
             .is_some_and(|(at, _, _)| now.duration_since(*at) > RATE_WINDOW)
         {
-            self.recent.pop_front();
+            if let Some((_, None, _)) = self.recent.pop_front() {
+                self.lost -= 1;
+            }
         }
 
         let mut delays: Vec<i128> = packets.iter().filter_map(owd).collect();
@@ -113,13 +118,24 @@ impl Detector {
         }
     }
 
-    pub fn evidence(&self, now: Instant) -> Evidence {
-        let queueing = self
-            .queueing_since
-            .is_some_and(|since| now.duration_since(since) >= SUSTAINED);
+    fn queueing(&self, now: Instant) -> bool {
+        self.queueing_since
+            .is_some_and(|since| now.duration_since(since) >= SUSTAINED)
+    }
+
+    fn loss(&self) -> bool {
         let total = self.recent.len();
-        let lost = self.recent.iter().filter(|(_, a, _)| a.is_none()).count();
-        let loss = total >= 10 && lost as f64 >= total as f64 * LOSS;
+        total >= 10 && self.lost as f64 >= total as f64 * LOSS
+    }
+
+    /// Queueing or loss, as `evidence` finds them, without working out the
+    /// delivered rate: what each feedback report is checked for.
+    pub fn congested(&self, now: Instant) -> bool {
+        self.queueing(now) || self.loss()
+    }
+
+    pub fn evidence(&self, now: Instant) -> Evidence {
+        let (queueing, loss) = (self.queueing(now), self.loss());
         // Delivered: bytes that arrived after the first arrival, over the
         // span from it to the last.
         let mut first: Option<(Instant, u16)> = None;

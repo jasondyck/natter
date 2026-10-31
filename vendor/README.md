@@ -334,6 +334,15 @@ that dimpl accepts it.
 natter generates one per process (`rtc_config::certificate`), as mediasoup
 and Janus do, instead of one per peer connection.
 
+### Patch: AES-GCM in place
+
+The SRTP AES-GCM ciphers (128 and 256) used `Aead::encrypt`/`decrypt`,
+which return a new `Vec` per packet that was then copied into str0m's
+output buffer. `srtp.rs` now uses `AeadInOut::{encrypt,decrypt}_inout_detached`
+from str0m's input straight into its output, the tag written after. Same
+bytes (a test checks it against `Aead` for several lengths, split AAD and a
+changed byte); 2.7% fewer instructions per forwarded video packet.
+
 ### Patch: one dimpl config per MTU
 
 dimpl's `ConfigBuilder::build` self-tests the crypto provider (an ECDH
