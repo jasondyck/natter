@@ -288,28 +288,51 @@ impl Engine {
             .get::<video::DependencyDescriptor>();
         let track = &mut p.published[t_index];
         let len = pkt.payload.len();
+        let muted = track.info.muted;
+        let screen = track.info.source == lk::TrackSource::ScreenShare as i32;
         // SVC: which layers this packet's frame belongs to, by the
-        // dependency descriptor of the one stream.
+        // dependency descriptor of the one stream, and which spatial layers
+        // are live, by the decode targets it has active.
         let svc_mode = video::is_svc(codec) && rid.is_none();
         let mut svc_frame = None;
         if svc_mode {
             let svc = track.svc.get_or_insert_with(|| Svc {
                 dd: dd::Stream::default(),
-                spatial: [0, 1, 2].map(|s| Layer::new(None, s, now)),
+                spatial: [0, 1, 2].map(|s| {
+                    let mut l = Layer::new(None, s, screen, now);
+                    l.tracker = video::Tracker::decode_targets(now);
+                    l
+                }),
             });
             if let Some(f) = dd.and_then(|dd| svc.dd.parse(&dd.0)) {
                 svc.spatial[usize::from(f.spatial.min(2))].count(len, f.temporal, f.start, now);
                 svc_frame = svc.dd.structure.clone().map(|st| (f, st, svc.dd.active));
+            }
+            let top = svc.dd.structure.as_ref().and_then(|st| {
+                st.dt_layers
+                    .iter()
+                    .enumerate()
+                    .filter(|&(k, _)| k < 32 && svc.dd.active & (1 << k) != 0)
+                    .map(|(_, &(s, _))| s)
+                    .max()
+            });
+            for l in &mut svc.spatial {
+                l.tracker.observe(muted, now);
+                l.tracker
+                    .set_decodable(top.is_some_and(|top| l.spatial <= top));
             }
         }
         let layer = match track.layers.iter().position(|l| l.rid == rid) {
             Some(k) => &mut track.layers[k],
             None => {
                 let spatial = video::spatial(&track.info.layers, rid);
-                track.layers.push(Layer::new(rid, spatial, now));
+                track.layers.push(Layer::new(rid, spatial, screen, now));
                 track.layers.last_mut().expect("pushed")
             }
         };
+        if len > 0 {
+            layer.tracker.observe(muted, now);
+        }
         // A simulcast stream's temporal layers: by its dependency
         // descriptor (Chrome sends VP8 with one and no PictureID), else by
         // the VP8 payload descriptor, whose picture numbering subscribers
@@ -396,7 +419,7 @@ impl Engine {
             .map(|s| s.spatial.each_ref().map(|l| l.fps));
         // The layer to follow for each highest layer a subscriber may want.
         let targets: [Option<Option<Rid>>; 4] =
-            [0, 1, 2, video::ANY_LAYER].map(|max| video::target_layer(&track.layers, max, now));
+            [0, 1, 2, video::ANY_LAYER].map(|max| video::target_layer(&track.layers, max));
         let seq: u64 = *pkt.seq_no;
         let ts = pkt.header.timestamp;
         let ext = ExtensionValues {
@@ -710,6 +733,23 @@ impl Engine {
         stream.request_keyframe(KeyframeRequestKind::Pli);
         p.publisher.dirty = true;
         self.touched.push((i, Side::Publisher));
+    }
+
+    /// Ends the stream trackers' cycles that are over, so a layer that
+    /// stopped sending stops counting as live (`video::Tracker`).
+    pub(super) fn track_layers(&mut self, now: Instant) {
+        for p in &mut self.participants {
+            for t in &mut p.published {
+                if t.kind != MediaKind::Video {
+                    continue;
+                }
+                let muted = t.info.muted;
+                let svc = t.svc.iter_mut().flat_map(|s| s.spatial.iter_mut());
+                for l in t.layers.iter_mut().chain(svc) {
+                    l.tracker.tick(muted, now);
+                }
+            }
+        }
     }
 
     /// Until a new video track's first keyframe, asks for one every

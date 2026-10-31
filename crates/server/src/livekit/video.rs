@@ -17,8 +17,6 @@ use str0m::format::{Codec, PayloadParams};
 use str0m::media::Rid;
 use str0m::rtp::{Extension, ExtensionSerializer, ExtensionValues};
 
-/// A layer not heard from in this long is treated as stopped.
-pub const LAYER_TIMEOUT: Duration = Duration::from_secs(1);
 /// Least time between keyframe requests to one layer, as LiveKit's
 /// `pli_throttle` for its low layer and its buffers' default.
 pub const PLI_THROTTLE: Duration = Duration::from_millis(500);
@@ -488,7 +486,8 @@ pub fn max_layer(ladder: &[lk::VideoLayer], s: &lk::UpdateTrackSettings) -> Opti
 pub struct Layer {
     pub rid: Option<Rid>,
     pub spatial: u8,
-    pub last_seen: Instant,
+    /// Whether the layer is live.
+    pub tracker: Tracker,
     pub last_pli: Option<Instant>,
     /// Payload bytes since `window_start`, and the bitrate of the last
     /// whole window (0 until there is one).
@@ -513,11 +512,11 @@ const RATE_WINDOW: Duration = Duration::from_secs(1);
 pub const TEMPORAL_LAYERS: usize = 4;
 
 impl Layer {
-    pub fn new(rid: Option<Rid>, spatial: u8, now: Instant) -> Self {
+    pub fn new(rid: Option<Rid>, spatial: u8, screen: bool, now: Instant) -> Self {
         Layer {
             rid,
             spatial,
-            last_seen: now,
+            tracker: Tracker::packets(spatial, screen, now),
             last_pli: None,
             bytes: 0,
             window_start: now,
@@ -530,15 +529,14 @@ impl Layer {
         }
     }
 
-    pub fn live(&self, now: Instant) -> bool {
-        now.duration_since(self.last_seen) < LAYER_TIMEOUT
+    pub fn live(&self) -> bool {
+        self.tracker.live()
     }
 
     /// Counts a packet of `len` payload bytes, and its headers, of
     /// temporal layer `temporal` (0 when the stream has none), which begins
     /// a frame if `starts_frame`.
     pub fn count(&mut self, len: usize, temporal: u8, starts_frame: bool, now: Instant) {
-        self.last_seen = now;
         let bytes = len as u64 + super::allocator::PACKET_OVERHEAD;
         self.bytes += bytes;
         let t = usize::from(temporal).min(TEMPORAL_LAYERS - 1);
@@ -573,6 +571,157 @@ impl Layer {
     }
 }
 
+/// Whether a publisher's layer is live, as LiveKit's stream trackers. A
+/// simulcast layer (or a single stream) by its packets (LiveKit's default
+/// packet tracker): live from its first packet, stopped after a cycle with
+/// too few, and live again only after `cycles` cycles in a row with enough
+/// (2 s for the lowest layer, 10 s for the others; 2 s for a screen
+/// share), so a layer the publisher's encoder keeps dropping and restarting
+/// isn't switched to each time. A reset (unmute, or dynacast asking for the
+/// layer again) makes its next packet live at once. An SVC spatial layer is
+/// live while the decode targets the publisher has active include it
+/// (LiveKit's dependency descriptor tracker). Muted, nothing is live.
+#[derive(Debug, Clone, Copy)]
+pub struct Tracker {
+    rule: TrackerRule,
+    paused: bool,
+    active: bool,
+    /// Packet tracker: seen a packet since the last reset; packets this
+    /// cycle; cycles in a row with enough; when this cycle began.
+    initialized: bool,
+    count: u32,
+    good: u32,
+    cycle_start: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrackerRule {
+    Packets {
+        samples: u32,
+        cycles: u32,
+        cycle: Duration,
+    },
+    Decode,
+}
+
+impl Tracker {
+    /// LiveKit's `DefaultStreamTrackerPacketConfigVideo` and
+    /// `...Screenshare`.
+    pub fn packets(spatial: u8, screen: bool, now: Instant) -> Self {
+        let rule = match (screen, spatial) {
+            (true, _) => TrackerRule::Packets {
+                samples: 1,
+                cycles: 1,
+                cycle: Duration::from_secs(2),
+            },
+            (false, 0) => TrackerRule::Packets {
+                samples: 1,
+                cycles: 4,
+                cycle: Duration::from_millis(500),
+            },
+            (false, _) => TrackerRule::Packets {
+                samples: 5,
+                cycles: 20,
+                cycle: Duration::from_millis(500),
+            },
+        };
+        Tracker {
+            rule,
+            paused: false,
+            active: false,
+            initialized: false,
+            count: 0,
+            good: 0,
+            cycle_start: now,
+        }
+    }
+
+    /// An SVC spatial layer's, set by `set_decodable`.
+    pub fn decode_targets(now: Instant) -> Self {
+        Tracker {
+            rule: TrackerRule::Decode,
+            ..Tracker::packets(0, false, now)
+        }
+    }
+
+    pub fn live(&self) -> bool {
+        self.active && !self.paused
+    }
+
+    /// A packet of the layer, its track muted or not.
+    pub fn observe(&mut self, muted: bool, now: Instant) {
+        self.tick(muted, now);
+        if self.paused || self.rule == TrackerRule::Decode {
+            return;
+        }
+        if !self.initialized {
+            self.initialized = true;
+            self.active = true;
+            self.count = 1;
+            self.good = 0;
+            self.cycle_start = now;
+            return;
+        }
+        self.count += 1;
+    }
+
+    /// SVC: whether the publisher's active decode targets include it.
+    pub fn set_decodable(&mut self, decodable: bool) {
+        if self.rule == TrackerRule::Decode {
+            self.active = decodable;
+        }
+    }
+
+    /// Starts over: stopped until its next packet, which makes it live.
+    pub fn reset(&mut self, now: Instant) {
+        if self.rule == TrackerRule::Decode {
+            return;
+        }
+        self.active = false;
+        self.initialized = false;
+        self.count = 0;
+        self.good = 0;
+        self.cycle_start = now;
+    }
+
+    /// Ends the cycles that are over (at least every `cycle`; the engine
+    /// calls it with its housekeeping), and follows the track's mute:
+    /// unmuted, it starts over.
+    pub fn tick(&mut self, muted: bool, now: Instant) {
+        if muted != self.paused {
+            self.paused = muted;
+            if !muted {
+                self.reset(now);
+            }
+        }
+        let TrackerRule::Packets {
+            samples,
+            cycles,
+            cycle,
+        } = self.rule
+        else {
+            return;
+        };
+        if self.paused || !self.initialized {
+            return;
+        }
+        let over =
+            (now.saturating_duration_since(self.cycle_start).as_nanos() / cycle.as_nanos()) as u32;
+        for k in 0..over.min(2) {
+            // After the first, the cycles that ended are empty.
+            let count = if k == 0 { self.count } else { 0 };
+            self.good = if count >= samples { self.good + 1 } else { 0 };
+            if self.good == 0 {
+                self.active = false;
+            } else if self.good >= cycles {
+                self.active = true;
+            }
+            self.count = 0;
+        }
+        self.cycle_start += cycle * over;
+    }
+}
+
 /// The temporal layer that serves a subscriber asking for `fps` frames a
 /// second from a layer with these frame rates: the lowest whose rate is
 /// within 90% of it, as LiveKit's `GetTemporalLayerForSpatialFps`; all of
@@ -590,8 +739,8 @@ pub fn temporal_for_fps(rates: &[f32; TEMPORAL_LAYERS], fps: u32) -> u8 {
 
 /// The layer to follow for a subscriber wanting at most `max`: the
 /// highest live layer up to it, else the lowest live layer.
-pub fn target_layer(layers: &[Layer], max: u8, now: Instant) -> Option<Option<Rid>> {
-    let live = || layers.iter().filter(|l| l.live(now));
+pub fn target_layer(layers: &[Layer], max: u8) -> Option<Option<Rid>> {
+    let live = || layers.iter().filter(|l| l.live());
     live()
         .filter(|l| l.spatial <= max)
         .max_by_key(|l| l.spatial)
@@ -1134,26 +1283,123 @@ mod tests {
     #[test]
     fn follows_the_highest_live_layer_it_may() {
         let now = Instant::now();
-        let layer = |rid: &str, spatial: u8, ago: u64| Layer {
-            last_seen: now - Duration::from_millis(ago),
-            ..Layer::new(Some(rid.into()), spatial, now)
+        // A layer that sent a packet, or (`live` false) sent one and then
+        // nothing for a cycle.
+        let layer = |rid: &str, spatial: u8, live: bool| {
+            let mut l = Layer::new(Some(rid.into()), spatial, false, now);
+            l.tracker.observe(false, now);
+            if !live {
+                l.tracker.tick(false, now + Duration::from_millis(1100));
+            }
+            l
         };
-        let all = [layer("q", 0, 0), layer("f", 2, 10), layer("h", 1, 0)];
-        assert_eq!(target_layer(&all, ANY_LAYER, now), Some(Some("f".into())));
-        assert_eq!(target_layer(&all, 1, now), Some(Some("h".into())));
-        assert_eq!(target_layer(&all, 0, now), Some(Some("q".into())));
-        let f_stopped = [layer("q", 0, 0), layer("f", 2, 2000)];
+        let all = [
+            layer("q", 0, true),
+            layer("f", 2, true),
+            layer("h", 1, true),
+        ];
+        assert_eq!(target_layer(&all, ANY_LAYER), Some(Some("f".into())));
+        assert_eq!(target_layer(&all, 1), Some(Some("h".into())));
+        assert_eq!(target_layer(&all, 0), Some(Some("q".into())));
+        let f_stopped = [layer("q", 0, true), layer("f", 2, false)];
+        assert_eq!(target_layer(&f_stopped, ANY_LAYER), Some(Some("q".into())));
+        let only_f = [layer("q", 0, false), layer("f", 2, true)];
         assert_eq!(
-            target_layer(&f_stopped, ANY_LAYER, now),
-            Some(Some("q".into()))
-        );
-        let only_f = [layer("q", 0, 2000), layer("f", 2, 0)];
-        assert_eq!(
-            target_layer(&only_f, 0, now),
+            target_layer(&only_f, 0),
             Some(Some("f".into())),
             "lowest live"
         );
-        assert_eq!(target_layer(&[], 0, now), None);
+        assert_eq!(target_layer(&[], 0), None);
+    }
+
+    /// Packets at `pps` from `from` for `secs`, ticking every 100 ms as the
+    /// engine's housekeeping; returns the time it got to.
+    fn feed(t: &mut Tracker, from: Instant, secs: f32, pps: u32) -> Instant {
+        let steps = (secs * 10.0) as u32;
+        let mut sent = 0;
+        let mut now = from;
+        for k in 1..=steps {
+            now = from + Duration::from_millis(u64::from(k) * 100);
+            while sent * 10 < k * pps {
+                t.observe(false, now);
+                sent += 1;
+            }
+            t.tick(false, now);
+        }
+        now
+    }
+
+    #[test]
+    fn packet_tracker_as_livekits() {
+        let t0 = Instant::now();
+        // A high layer: live from its first packet, stopped after a cycle
+        // with fewer than 5, live again only after 10 s with enough.
+        let mut f = Tracker::packets(2, false, t0);
+        assert!(!f.live());
+        f.observe(false, t0);
+        assert!(f.live());
+        let t = feed(&mut f, t0, 2.0, 30);
+        assert!(f.live());
+        let t = feed(&mut f, t, 1.0, 0);
+        assert!(!f.live(), "a silent cycle stops it");
+        let t = feed(&mut f, t, 9.0, 30);
+        assert!(!f.live(), "not back before 10 s");
+        let t = feed(&mut f, t, 1.5, 30);
+        assert!(f.live(), "back after 20 good cycles");
+        // Too few packets a cycle (4 per 500 ms) keep it stopped.
+        let t = feed(&mut f, t, 1.0, 0);
+        let t = feed(&mut f, t, 12.0, 8);
+        assert!(!f.live());
+        // Reset (dynacast asked for it again): its next packet.
+        f.reset(t);
+        assert!(!f.live());
+        f.observe(false, t);
+        assert!(f.live());
+
+        // The lowest layer needs one packet a cycle, and 2 s to return.
+        let mut q = Tracker::packets(0, false, t0);
+        q.observe(false, t0);
+        let t = feed(&mut q, t0, 3.0, 4);
+        assert!(q.live());
+        let t = feed(&mut q, t, 1.0, 0);
+        assert!(!q.live());
+        let t = feed(&mut q, t, 1.5, 4);
+        assert!(!q.live());
+        feed(&mut q, t, 1.0, 4);
+        assert!(q.live());
+
+        // A screen share: a packet in 2 s keeps it, and brings it back.
+        let mut s = Tracker::packets(2, true, t0);
+        s.observe(false, t0);
+        let t = feed(&mut s, t0, 4.0, 1);
+        assert!(s.live());
+        let t = feed(&mut s, t, 4.5, 0);
+        assert!(!s.live());
+        feed(&mut s, t, 4.0, 1);
+        assert!(s.live());
+    }
+
+    #[test]
+    fn muted_layers_are_not_live_and_start_over() {
+        let t0 = Instant::now();
+        let mut f = Tracker::packets(2, false, t0);
+        f.observe(false, t0);
+        let t = feed(&mut f, t0, 1.0, 30);
+        f.tick(true, t);
+        assert!(!f.live());
+        // Packets while muted don't count; unmuted, the first is live.
+        f.observe(true, t);
+        assert!(!f.live());
+        f.observe(false, t + Duration::from_secs(5));
+        assert!(f.live());
+        // SVC: by the decode targets, while not muted.
+        let mut s = Tracker::decode_targets(t0);
+        s.observe(false, t0);
+        assert!(!s.live());
+        s.set_decodable(true);
+        assert!(s.live());
+        s.tick(true, t0);
+        assert!(!s.live());
     }
 
     fn req(layers: &[(VideoQuality, u32, u32)]) -> lk::AddTrackRequest {
@@ -1427,7 +1673,7 @@ mod tests {
     #[test]
     fn layer_frame_rates() {
         let t0 = Instant::now();
-        let mut l = Layer::new(None, 0, t0);
+        let mut l = Layer::new(None, 0, false, t0);
         // 30 frames a second in L1T3, two packets each.
         for k in 0..32u32 {
             let at = t0 + Duration::from_micros(u64::from(k) * 33_334);

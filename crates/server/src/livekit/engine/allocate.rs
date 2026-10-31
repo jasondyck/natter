@@ -86,7 +86,7 @@ impl Engine {
             if let Some(svc) = &t.svc {
                 let mut sum = [0u32; allocator::TEMPORAL];
                 for l in &svc.spatial {
-                    if !l.live(now) {
+                    if !l.live() {
                         break;
                     }
                     let s = usize::from(l.spatial);
@@ -102,7 +102,7 @@ impl Engine {
                     fps[s] = l.fps;
                 }
             }
-            for l in t.layers.iter().filter(|l| l.live(now) && t.svc.is_none()) {
+            for l in t.layers.iter().filter(|l| l.live() && t.svc.is_none()) {
                 let s = l.spatial.min(2);
                 let announced = t
                     .info
@@ -412,6 +412,33 @@ impl Engine {
                 };
                 if send {
                     debug!(identity = %p.identity, track = %track.info.sid, ?want, "dynacast");
+                    // Layers asked for again start over, so their first
+                    // packet makes them live (LiveKit's
+                    // `SetMaxExpectedSpatialLayer`); per codec.
+                    let expected = |q: Option<lk::VideoQuality>, ladder: &[lk::VideoLayer]| {
+                        q.map(|q| video::spatial_for_quality(ladder, q as i32))
+                    };
+                    let sid = track.info.sid.clone();
+                    for (k, (w, c)) in want.iter().zip(track.dynacast).enumerate() {
+                        let codec = if k == 0 {
+                            Some(&mut p.published[t])
+                        } else {
+                            p.published
+                                .iter_mut()
+                                .find(|b| b.backup_of.as_deref() == Some(sid.as_str()))
+                        };
+                        let Some(codec) = codec else {
+                            continue;
+                        };
+                        let from = expected(c, &codec.info.layers);
+                        let to = expected(*w, &codec.info.layers);
+                        for l in &mut codec.layers {
+                            if Some(l.spatial) > from && Some(l.spatial) <= to {
+                                l.tracker.reset(now);
+                            }
+                        }
+                    }
+                    let track = &mut p.published[t];
                     track.dynacast = want;
                     track.dynacast_lower = None;
                     let update =

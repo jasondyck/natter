@@ -207,7 +207,7 @@ impl Engine {
         now: Instant,
     ) {
         let track = &mut self.participants[i].published[t];
-        let target = video::target_layer(&track.layers, video::ANY_LAYER, now);
+        let target = video::target_layer(&track.layers, video::ANY_LAYER);
         let keyframe = video::starts_keyframe(codec, &pkt.payload);
         let seq: u64 = *pkt.seq_no;
         let ts = pkt.header.timestamp;

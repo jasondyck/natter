@@ -144,7 +144,6 @@ offered follows how people judge video on calls (`allocator::Track::shape`):
   shares (`maintain-resolution`; cameras `maintain-framerate`).
 
 **Next:** the open items, in order:
-   - Stream trackers as LiveKit's.
    - `subscribed_audio_codec_update`: needs audio backup codecs first
      (audio publications with more than one codec, which natter doesn't
      take yet). Of LiveKit's SDKs only the Go one (`server-sdk-go`) acts on
@@ -331,9 +330,20 @@ late joiners and re-enabled tracks included (`bench/e2e/h265.mjs`).
       the lowest live one), switching up or down only at a keyframe of the
       new layer, with a PLI to it meanwhile (C.1–C.2). Temporal layers are
       all forwarded
-- [ ] Stream trackers as LiveKit's (C.3): a layer counts as live while a
-      packet came within 1 s; LiveKit's packet tracker takes ~2 s (layer 0)
-      or ~10 s (layers 1–2) of steady packets to re-activate one
+- [x] Stream trackers as LiveKit's (C.3; `video::Tracker`): a simulcast
+      layer (or a single stream) by LiveKit's default packet tracker, live
+      from its first packet, stopped after a 500 ms cycle with fewer than
+      1 packet (lowest layer) or 5 (the others), live again only after 4
+      or 20 such cycles in a row (2 s, 10 s); screen shares 1 packet per
+      2 s cycle. Muted, nothing is live, and on unmute the trackers start
+      over; dynacast asking for higher layers again starts theirs over
+      too, so their first packet is live (`SetMaxExpectedSpatialLayer`).
+      SVC spatial layers by the publisher's active decode targets (the
+      dependency descriptor tracker). Was: live while a packet came within
+      1 s. `bench/e2e/layerback.mjs` (top encoding off for 4 s and on;
+      `DYNACAST=1`: LOW for 8 s, then HIGH): same as LiveKit to the
+      second, 360p for 10 s after the layer is back, 720p within 1 s when
+      dynacast asked for it
 - [x] `update_track_settings`: `disabled`, `quality`, `width`/`height`
       (smallest layer ≥ 90% of the size, heights or portrait widths),
       kept for tracks subscribed later; adaptive-stream clients start at
