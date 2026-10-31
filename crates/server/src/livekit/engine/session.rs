@@ -355,6 +355,7 @@ impl Engine {
             sub_permission: None,
             refused: vec![],
             mid_sent: vec![],
+            mid_frames: vec![],
         };
         if p.one_shot {
             p.cleanup_at = Some(Instant::now() + ONE_SHOT_CONNECT);

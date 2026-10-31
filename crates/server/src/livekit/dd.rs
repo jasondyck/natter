@@ -49,6 +49,20 @@ impl Structure {
     /// a receiver of `b` already has all of `a`'s references and can move
     /// to `a` at any frame. Not so between spatial layers that depend on
     /// each other only at keyframes (`L3T3_KEY`).
+    /// Decode target `dt` and those at or below both its layers, as a
+    /// bitmask: what a receiver of `dt` is sent (LiveKit's
+    /// `GetActiveDecodeTargetBitmask`).
+    pub fn at_or_below(&self, dt: usize) -> u32 {
+        let Some(&(s, t)) = self.dt_layers.get(dt) else {
+            return 0;
+        };
+        self.dt_layers
+            .iter()
+            .enumerate()
+            .filter(|&(k, &(ls, lt))| k < 32 && ls <= s && lt <= t)
+            .fold(0, |m, (k, _)| m | 1 << k)
+    }
+
     pub fn contained_in(&self, a: usize, b: usize) -> bool {
         self.templates
             .iter()
@@ -71,6 +85,23 @@ pub struct Frame {
     pub active: Option<u32>,
     /// A structure this descriptor carried (on keyframes).
     pub structure: Option<Structure>,
+    /// The frame number extended past 16 bits, by the stream it came on
+    /// (`Stream::parse`; 0 from `parse`).
+    pub ext_number: u64,
+    pub layout: Layout,
+}
+
+/// Where a descriptor's optional parts lie, in bits, for rewriting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Layout {
+    /// Past the mandatory 3 bytes: the extended fields' flags follow.
+    pub extended: bool,
+    pub has_structure: bool,
+    /// Where the active decode targets bitmask goes (after the structure),
+    /// where it ends (the same when it has none), and the descriptor's end.
+    pub mask_at: usize,
+    pub mask_end: usize,
+    pub end: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -122,6 +153,8 @@ impl Bits<'_> {
 pub struct Stream {
     pub structure: Option<Arc<Structure>>,
     pub active: u32,
+    /// The highest extended frame number seen.
+    last_ext: Option<u64>,
 }
 
 impl Stream {
@@ -135,6 +168,15 @@ impl Stream {
         }
         if let Some(a) = f.active {
             self.active = a;
+        }
+        // Extended numbers start at 2^32, so reordered frames before the
+        // first never go below zero.
+        f.ext_number = match self.last_ext {
+            None => (1 << 32) + u64::from(f.number),
+            Some(l) => l.wrapping_add_signed(i64::from(f.number.wrapping_sub(l as u16) as i16)),
+        };
+        if self.last_ext.is_none_or(|l| f.ext_number > l) {
+            self.last_ext = Some(f.ext_number);
         }
         Some(f)
     }
@@ -150,7 +192,13 @@ pub fn parse(data: &[u8], known: Option<&Structure>) -> Result<Frame, Error> {
     let (mut custom_dtis, mut custom_fdiffs, mut custom_chains) = (false, false, false);
     let mut structure = None;
     let mut active = None;
-    if data.len() > 3 {
+    let mut layout = Layout {
+        extended: data.len() > 3,
+        mask_at: 24,
+        mask_end: 24,
+        ..Default::default()
+    };
+    if layout.extended {
         let structure_present = b.flag()?;
         let active_present = b.flag()?;
         custom_dtis = b.flag()?;
@@ -165,6 +213,8 @@ pub fn parse(data: &[u8], known: Option<&Structure>) -> Result<Frame, Error> {
             });
             structure = Some(s);
         }
+        layout.has_structure = structure_present;
+        layout.mask_at = b.pos;
         if active_present {
             let dt_cnt = structure
                 .as_ref()
@@ -173,6 +223,7 @@ pub fn parse(data: &[u8], known: Option<&Structure>) -> Result<Frame, Error> {
                 .dt_cnt();
             active = Some(b.f(dt_cnt as u32)?);
         }
+        layout.mask_end = b.pos;
     }
     let s = structure.as_ref().or(known).ok_or(Error::NoStructure)?;
     let index = (usize::from(template_id) + 64 - usize::from(s.template_id_offset)) % 64;
@@ -202,6 +253,7 @@ pub fn parse(data: &[u8], known: Option<&Structure>) -> Result<Frame, Error> {
             b.f(8)?;
         }
     }
+    layout.end = b.pos;
     Ok(Frame {
         start,
         end,
@@ -212,7 +264,63 @@ pub fn parse(data: &[u8], known: Option<&Structure>) -> Result<Frame, Error> {
         fdiffs,
         active,
         structure,
+        ext_number: 0,
+        layout,
     })
+}
+
+/// A descriptor as sent on: `data` (parsed as `f`) with frame number
+/// `number` and the active decode targets bitmask `active` (of `dt_cnt`
+/// decode targets), which a 3-byte descriptor gains extended fields for.
+pub fn rewrite(data: &[u8], f: &Frame, dt_cnt: usize, number: u16, active: u32) -> Vec<u8> {
+    let l = &f.layout;
+    let mut w = Writer::default();
+    w.copy(data, 0, 8);
+    w.put(u32::from(number), 16);
+    if l.extended {
+        w.copy(data, 24, 25);
+        w.put(1, 1);
+        w.copy(data, 26, l.mask_at);
+    } else {
+        // No structure, the bitmask, no custom DTIs, fdiffs or chains.
+        w.put(0b01000, 5);
+    }
+    w.put(active, dt_cnt);
+    if l.extended {
+        w.copy(data, l.mask_end, l.end);
+    }
+    w.bytes
+}
+
+#[derive(Default)]
+struct Writer {
+    bytes: Vec<u8>,
+    bits: usize,
+}
+
+impl Writer {
+    fn bit(&mut self, v: bool) {
+        if self.bits.is_multiple_of(8) {
+            self.bytes.push(0);
+        }
+        if v {
+            *self.bytes.last_mut().expect("pushed") |= 0x80 >> (self.bits % 8);
+        }
+        self.bits += 1;
+    }
+
+    fn put(&mut self, v: u32, n: usize) {
+        for k in (0..n).rev() {
+            self.bit((v >> k) & 1 == 1);
+        }
+    }
+
+    /// Bits `from..to` of `data`.
+    fn copy(&mut self, data: &[u8], from: usize, to: usize) {
+        for pos in from..to {
+            self.bit((data[pos / 8] >> (7 - pos % 8)) & 1 == 1);
+        }
+    }
 }
 
 fn template_dependency_structure(b: &mut Bits) -> Result<Structure, Error> {
@@ -374,6 +482,96 @@ mod tests {
         // A lower spatial layer: L3T3_KEY predicts across them only at
         // keyframes, so the top layer's receiver lacks its references.
         assert!(!s.contained_in(dt((1, 2)), dt((2, 2))));
+    }
+
+    /// What a rewrite must keep: everything but the number and bitmask.
+    fn same_but(a: &Frame, b: &Frame) {
+        assert_eq!((a.start, a.end), (b.start, b.end));
+        assert_eq!((a.spatial, a.temporal), (b.spatial, b.temporal));
+        assert_eq!((&a.dtis, &a.fdiffs), (&b.dtis, &b.fdiffs));
+        assert_eq!(a.structure, b.structure);
+    }
+
+    #[test]
+    fn rewrites_number_and_active_targets() {
+        let kf = parse(&hex(KEY), None).unwrap();
+        let s = kf.structure.clone().unwrap();
+        // The keyframe: its structure kept, the bitmask replaced after it.
+        let out = rewrite(&hex(KEY), &kf, s.dt_cnt(), 0x1234, 0b11);
+        let r = parse(&out, None).unwrap();
+        same_but(&kf, &r);
+        assert_eq!((r.number, r.active), (0x1234, Some(0b11)));
+        assert_eq!(r.structure.as_ref(), Some(&s));
+        // A 3-byte descriptor gains the extended fields for its bitmask.
+        let short = hex("850004");
+        let f = parse(&short, Some(&s)).unwrap();
+        assert!(!f.layout.extended);
+        let out = rewrite(&short, &f, s.dt_cnt(), 7, 0b1_1111_1111);
+        let r = parse(&out, Some(&s)).unwrap();
+        same_but(&f, &r);
+        assert_eq!((r.number, r.active), (7, Some(0b1_1111_1111)));
+        // One that already had a bitmask (and custom fdiffs): replaced, the
+        // rest kept. Built from the short one, then rewritten again.
+        let with = rewrite(&short, &f, s.dt_cnt(), 8, 0b111);
+        let f2 = parse(&with, Some(&s)).unwrap();
+        assert!(f2.layout.mask_end > f2.layout.mask_at);
+        let r = parse(&rewrite(&with, &f2, s.dt_cnt(), 9, 0b1), Some(&s)).unwrap();
+        same_but(&f, &r);
+        assert_eq!((r.number, r.active), (9, Some(0b1)));
+    }
+
+    #[test]
+    fn rewrite_keeps_custom_fields() {
+        let s = parse(&hex(KEY), None).unwrap().structure.unwrap();
+        // Extended, no structure or bitmask, custom fdiffs: 2 and 5 (each
+        // a 2-bit size of 1 and 4 bits minus one), then the end.
+        let mut w = Writer::default();
+        w.put(0b10_000101, 8);
+        w.put(0x0042, 16);
+        w.put(0b00010, 5);
+        w.put(0b01, 2);
+        w.put(1, 4);
+        w.put(0b01, 2);
+        w.put(4, 4);
+        w.put(0, 2);
+        let data = w.bytes;
+        let f = parse(&data, Some(&s)).unwrap();
+        assert_eq!(f.fdiffs, [2, 5]);
+        let r = parse(&rewrite(&data, &f, s.dt_cnt(), 0x43, 0b111), Some(&s)).unwrap();
+        same_but(&f, &r);
+        assert_eq!((r.number, r.active), (0x43, Some(0b111)));
+    }
+
+    #[test]
+    fn decode_targets_at_or_below() {
+        let s = parse(&hex(KEY), None).unwrap().structure.unwrap();
+        let dt = |l: (u8, u8)| s.dt_layers.iter().position(|&x| x == l).unwrap();
+        let mask = |ls: &[(u8, u8)]| ls.iter().fold(0, |m, &l| m | 1 << dt(l));
+        assert_eq!(s.at_or_below(dt((0, 0))), mask(&[(0, 0)]));
+        assert_eq!(
+            s.at_or_below(dt((1, 1))),
+            mask(&[(0, 0), (0, 1), (1, 0), (1, 1)])
+        );
+        assert_eq!(s.at_or_below(dt((2, 2))), (1 << 9) - 1);
+    }
+
+    #[test]
+    fn extends_frame_numbers_across_wraps() {
+        let key = hex(KEY);
+        let mut st = Stream::default();
+        let first = st.parse(&key).unwrap().ext_number;
+        // 0xffff then 0x0001: forward 2 past the wrap; 0xfffe late.
+        let at = |n: u16| {
+            let mut d = hex("850000");
+            d[1..3].copy_from_slice(&n.to_be_bytes());
+            d
+        };
+        let a = st.parse(&at(0xffff)).unwrap().ext_number;
+        let b = st.parse(&at(0x0001)).unwrap().ext_number;
+        let c = st.parse(&at(0xfffe)).unwrap().ext_number;
+        assert_eq!(a, first - 2);
+        assert_eq!(b, a + 2);
+        assert_eq!(c, a - 1);
     }
 
     #[test]

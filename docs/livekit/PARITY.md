@@ -144,7 +144,6 @@ offered follows how people judge video on calls (`allocator::Track::shape`):
   shares (`maintain-resolution`; cameras `maintain-framerate`).
 
 **Next:** the open items, in order:
-   - DD rewrite (`DDForwarder`).
    - Stream trackers as LiveKit's.
    - `subscribed_audio_codec_update`: needs audio backup codecs first
      (audio publications with more than one codec, which natter doesn't
@@ -295,8 +294,8 @@ Before video, which multiplies packet rates: a 10-person video call is
       first in our answer, as LiveKit, so that is what the client sends.
       H.264 is matched by profile as libwebrtc classifies it.
 - [x] Header extensions per direction as LiveKit (A.4); TWCC on video
-      only (vendor patch); Dependency Descriptor passed through unchanged
-      (Chrome's AV1 receiver needs it; rewriting it is phase 6)
+      only (vendor patch); Dependency Descriptor rewritten per subscriber
+      (phase 6)
 - [x] PLI/FIR relay, one PLI upstream per 500 ms per layer (B.4);
       keyframe on subscribe; LiveKit's key-frame seeder (a PLI a second
       for up to 30 s until the first keyframe)
@@ -406,8 +405,21 @@ track and LOW for the other, no loss.
       320×180 / 640×360 / 1280×720 elements get those sizes, no freezes,
       same as LiveKit in the same script. Congestion control allocates
       SVC by cumulative spatial-layer rates
-- [ ] DD rewritten as LiveKit's `DDForwarder` (active decode targets);
-      passed through unchanged for now, which Chrome accepts
+- [x] DD rewritten per subscriber, SVC and simulcast alike, as LiveKit's
+      `DDForwarder` (`video::DdOut`, `dd::rewrite`): the active decode
+      targets bitmask on every packet (its decode target and those below
+      it, of what the publisher has active), and frame numbers that never
+      go back, since Chrome drops a keyframe numbered before the last
+      structure it took and every frame after. A keyframe that starts
+      another stream (a simulcast layer, the backup codec, a track taking
+      over the m-line, per m-line as `mid_sent`) continues from the last
+      number sent, as does one more than 64 back or 1000 ahead (an encoder
+      restart, a long pause); a new stream's frames before its keyframe go
+      without one. Simulcast streams carried none before (only SVC, the
+      publisher's unchanged), so a VP8 subscriber without PictureIDs found
+      references by sequence number. `bench/e2e/ddswitch.mjs` (layer
+      switch, republish onto the m-line, both sides' full reconnects;
+      VP8/VP9/AV1): same as LiveKit, no freezes
 - [x] Temporal layers by `fps` (VP8 simulcast by its dependency
       descriptor or TID with PictureID renumbering, VP9/AV1 SVC); see
       "Status"

@@ -390,7 +390,6 @@ impl Engine {
         let has_backup_codec = track.info.codecs.len() > 1;
         let has_trailer = !track.info.packet_trailer_features.is_empty();
         let track_sid = track.info.sid.clone();
-        let describe = svc_frame.is_some();
         let svc_rates = track
             .svc
             .as_ref()
@@ -400,26 +399,16 @@ impl Engine {
             [0, 1, 2, video::ANY_LAYER].map(|max| video::target_layer(&track.layers, max, now));
         let seq: u64 = *pkt.seq_no;
         let ts = pkt.header.timestamp;
-        let mut ext = ExtensionValues {
+        let ext = ExtensionValues {
             abs_capture_time: pkt.header.ext_vals.abs_capture_time,
             ..Default::default()
         };
-        // The dependency descriptor only for SVC, where every subscriber
-        // takes frames of the one stream it describes. Across simulcast
-        // layers (separate encoders, each its own structure and frame
-        // numbers) it would be wrong after a switch, and a receiver that
-        // missed the structure (Chrome rebuilds its receive stream when
-        // an answer relabels the m-line) drops every packet it can't parse.
-        // LiveKit sends none for simulcast either.
-        if describe
-            && let Some(dd) = pkt
-                .header
-                .ext_vals
-                .user_values
-                .get::<video::DependencyDescriptor>()
-        {
-            ext.user_values.set(dd.clone());
-        }
+        // The dependency descriptor, rewritten per subscriber (its decode
+        // targets and frame numbers), shared by those it comes out the same
+        // for.
+        let dd_in = dd.cloned();
+        let dd_source: video::DdSource = (backup_of.is_some(), rid);
+        let mut described: Vec<(u16, u32, Arc<[u8]>)> = vec![];
         let mut want_keyframe: Vec<Option<Rid>> = vec![];
         // VP8 payloads renumbered, shared by subscribers that see the same
         // numbers (and trailer or not).
@@ -516,6 +505,7 @@ impl Engine {
             // end of its top spatial layer, and the sequence numbers kept
             // contiguous over what is dropped.
             let mut marker = pkt.header.marker;
+            let mut dd_ext = None;
             if let Some((f, st, active)) = svc_frame.as_ref().or(layer_frame.as_ref()) {
                 // A simulcast stream's are its temporal layers only.
                 let limit = match svc_rates {
@@ -550,6 +540,31 @@ impl Engine {
                             d.seq_offset = Some(o.wrapping_sub(1));
                         }
                         continue;
+                    }
+                }
+                // Its decode target and those below it, of what the
+                // publisher has active (LiveKit's `DDForwarder`).
+                if let Some(data) = &dd_in {
+                    if let Some(&(_, last)) = s.mid_frames.iter().find(|(m, _)| *m == mid) {
+                        d.dd_out.seed(last);
+                    }
+                    let mask = d.svc.dt.map_or(*active, |dt| st.at_or_below(dt) & *active);
+                    if let Some(number) = d.dd_out.number(dd_source, f) {
+                        let k = match described.iter().position(|x| x.0 == number && x.1 == mask) {
+                            Some(k) => k,
+                            None => {
+                                let out = dd::rewrite(&data.0, f, st.dt_cnt(), number, mask);
+                                described.push((number, mask, out.into()));
+                                described.len() - 1
+                            }
+                        };
+                        dd_ext = Some(video::DependencyDescriptor(described[k].2.clone()));
+                        if let Some(last) = d.dd_out.last {
+                            match s.mid_frames.iter_mut().find(|(m, _)| *m == mid) {
+                                Some(x) => x.1 = x.1.max(last),
+                                None => s.mid_frames.push((mid, last)),
+                            }
+                        }
                     }
                 }
             }
@@ -625,7 +640,13 @@ impl Engine {
                 ts,
                 payload,
                 marker,
-                ext.clone(),
+                {
+                    let mut ext = ext.clone();
+                    if let Some(dd) = dd_ext {
+                        ext.user_values.set(dd);
+                    }
+                    ext
+                },
                 now,
             );
             let Some((out_seq, out_ts)) = sent else {

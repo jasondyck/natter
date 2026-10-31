@@ -329,9 +329,9 @@ fn h264_profile(profile_level_id: u32) -> H264Profile {
 }
 
 /// The AV1 RTP spec's Dependency Descriptor header extension. Chrome's AV1
-/// (and VP9 SVC) receivers need it to assemble frames; natter passes it
-/// through unchanged (rewriting it per subscriber comes with SVC, PARITY
-/// phase 6).
+/// (and VP9 SVC) receivers need it to assemble frames, and with it finds a
+/// simulcast VP8 stream's references without PictureIDs; natter rewrites it
+/// per subscriber (`DdOut`, `dd::rewrite`).
 pub const DD_URI: &str =
     "https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension";
 
@@ -630,6 +630,68 @@ impl SvcDown {
 
     fn mark_sent(&mut self, number: u16) {
         self.sent[usize::from(number % 64)] = u32::from(number) + 1;
+    }
+}
+
+/// The stream a subscriber's descriptors come from: the backup codec's or
+/// the primary's, and its simulcast layer.
+pub type DdSource = (bool, Option<Rid>);
+
+/// The frame numbers of the descriptors a subscriber is sent, as LiveKit's
+/// `DDForwarder`: they never go back, or Chrome drops a keyframe older than
+/// the last structure it took and every frame after it. So a keyframe that
+/// starts another stream (a simulcast layer, the backup codec, another
+/// track taking over the m-line) continues from the last number sent, as
+/// does one far from it (the publisher's encoder restarted, or forwarding
+/// paused a long while); otherwise numbers keep their offset, so frame and
+/// chain diffs stay valid.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DdOut {
+    source: Option<DdSource>,
+    offset: u64,
+    /// The highest number sent (extended).
+    pub last: Option<u64>,
+}
+
+/// How far, in frames, a keyframe's number may be from the last sent before
+/// it counts as another stream (chosen: back by more than packets arrive
+/// reordered, forward by about 30 s at 30 fps).
+const DD_BACK: i64 = 64;
+const DD_AHEAD: i64 = 1000;
+
+impl DdOut {
+    /// Carries on from another stream's last number (the m-line's).
+    pub fn seed(&mut self, last: u64) {
+        if self.last.is_none() {
+            self.last = Some(last);
+        }
+    }
+
+    /// The number to send `f` with; None while a new stream waits for its
+    /// keyframe's structure (sent without a descriptor).
+    pub fn number(&mut self, source: DdSource, f: &super::dd::Frame) -> Option<u16> {
+        let far = |out: u64, last: u64| {
+            let d = out.wrapping_sub(last) as i64;
+            d <= -DD_BACK || d > DD_AHEAD
+        };
+        let restart = self.source != Some(source)
+            || self
+                .last
+                .is_some_and(|l| far(f.ext_number.wrapping_add(self.offset), l));
+        if restart {
+            if !f.layout.has_structure {
+                return None;
+            }
+            self.source = Some(source);
+            self.offset = self
+                .last
+                .map_or(0, |l| l.wrapping_add(1).wrapping_sub(f.ext_number));
+        }
+        let out = f.ext_number.wrapping_add(self.offset);
+        if self.last.is_none_or(|l| out > l) {
+            self.last = Some(out);
+        }
+        Some(out as u16)
     }
 }
 
@@ -1392,5 +1454,53 @@ mod tests {
             "{:?}",
             l.temporal_rates
         );
+    }
+
+    #[test]
+    fn dd_numbers_never_go_back() {
+        use super::super::dd;
+        use super::*;
+        let hex = |s: &str| -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        let key = |n: u16| {
+            let mut d = hex(
+                "c00001c0081485214eaaaaa8000600004000100002aa80a8000600004000100002a000a800060000400016d549241b5524906d54923157e001974ca864330e222396eca8655304224390eca87753013f00b3027f016704ff02cf0380",
+            );
+            d[1..3].copy_from_slice(&n.to_be_bytes());
+            d
+        };
+        let delta = |n: u16| {
+            let mut d = hex("850000");
+            d[1..3].copy_from_slice(&n.to_be_bytes());
+            d
+        };
+        let (q, h) = ((false, Some(Rid::from("q"))), (false, Some(Rid::from("h"))));
+        let mut out = DdOut::default();
+        let mut sq = dd::Stream::default();
+        let mut sh = dd::Stream::default();
+        // Layer q from its keyframe at 500: numbers as they come.
+        assert_eq!(out.number(q, &sq.parse(&key(500)).unwrap()), Some(500));
+        assert_eq!(out.number(q, &sq.parse(&delta(502)).unwrap()), Some(502));
+        // A late packet: its own number, no rebase.
+        assert_eq!(out.number(q, &sq.parse(&delta(501)).unwrap()), Some(501));
+        // Layer h's frames before its keyframe: nothing to describe.
+        sh.parse(&key(90));
+        assert_eq!(out.number(h, &sh.parse(&delta(95)).unwrap()), None);
+        // Its keyframe, numbered below: carries on after 502.
+        assert_eq!(out.number(h, &sh.parse(&key(100)).unwrap()), Some(503));
+        assert_eq!(out.number(h, &sh.parse(&delta(101)).unwrap()), Some(504));
+        // The encoder restarts at 3: a keyframe far back is a new stream.
+        assert_eq!(out.number(h, &sh.parse(&key(3)).unwrap()), Some(505));
+        // A keyframe far ahead (paused a while) too, past the wrap.
+        assert_eq!(out.number(h, &sh.parse(&key(9000)).unwrap()), Some(506));
+        // A track taking over the m-line carries on from its last number.
+        let mut next = DdOut::default();
+        next.seed(out.last.unwrap());
+        let mut s2 = dd::Stream::default();
+        assert_eq!(next.number(q, &s2.parse(&key(40000)).unwrap()), Some(507));
     }
 }
